@@ -569,6 +569,21 @@ pub const CASES: &[Case] = &[
         ],
         features: FORK,
     },
+    Case {
+        name: "pack_locations.guard_refusals",
+        controls: &["pack-locations.fixture", "clock.advance"],
+        features: &[Feature::PackLocations],
+    },
+    Case {
+        name: "pack_locations.corrupt_location_fallback",
+        controls: &["pack-locations.fixture", "clock.advance"],
+        features: &[Feature::PackLocations],
+    },
+    Case {
+        name: "pack_locations.denial_after_issue_bound",
+        controls: &["pack-locations.fixture", "clock.advance"],
+        features: &[Feature::PackLocations],
+    },
 ];
 
 fn identity(op: &Signed) -> ReplayIdentity {
@@ -1224,6 +1239,15 @@ async fn execute_case(
     client: &Client,
 ) -> Result<(), Failure> {
     match name {
+        "pack_locations.guard_refusals" => {
+            crate::controlled_pack_locations::guard_refusals(ctx, control).await
+        }
+        "pack_locations.corrupt_location_fallback" => {
+            crate::controlled_pack_locations::corrupt_location_fallback(ctx, control).await
+        }
+        "pack_locations.denial_after_issue_bound" => {
+            crate::controlled_pack_locations::denial_after_issue_bound(ctx, control).await
+        }
         name if name.starts_with("publication.") => {
             crate::controlled_publication::run(name, ctx, control).await
         }

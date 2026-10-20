@@ -919,7 +919,12 @@ impl HttpTransport for LocationScript {
     fn supports_pack_locations(&self) -> bool {
         true
     }
-    async fn fetch_pack_location(&self, url: &str, limit: usize) -> Result<Vec<u8>, String> {
+    async fn fetch_pack_location(
+        &self,
+        url: &str,
+        limit: usize,
+        _timeout: Option<std::time::Duration>,
+    ) -> Result<Vec<u8>, String> {
         assert_eq!(Some(url), self.location.url.as_deref());
         assert_eq!(
             limit,
@@ -1056,4 +1061,143 @@ fn pack_location_fallback_still_verifies_when_host_defers_stream_hash_checks() {
     let client = Client::anonymous(&script, destination()).with_request_policy(&DeferredHash);
     assert!(block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)).is_err());
     assert_eq!(*script.opt_ins.borrow(), [Some(true), None]);
+}
+
+struct LocationBudget {
+    script: LocationScript,
+    remaining: std::cell::Cell<std::time::Duration>,
+    after_rpc: std::time::Duration,
+    after_fetch: std::time::Duration,
+    fetch_timeout: std::cell::Cell<Option<std::time::Duration>>,
+    fallback_timeout: std::cell::Cell<Option<std::time::Duration>>,
+    fetch_delay: std::time::Duration,
+}
+impl LocationBudget {
+    fn new(after_rpc: std::time::Duration, after_fetch: std::time::Duration) -> Self {
+        Self {
+            script: LocationScript::valid(),
+            remaining: std::cell::Cell::new(std::time::Duration::from_secs(1)),
+            after_rpc,
+            after_fetch,
+            fetch_timeout: std::cell::Cell::new(None),
+            fallback_timeout: std::cell::Cell::new(None),
+            fetch_delay: std::time::Duration::ZERO,
+        }
+    }
+}
+impl mkit_client::RequestPolicy for LocationBudget {
+    fn headers(
+        &self,
+        _: &mkit_client::RequestContext<'_>,
+    ) -> Result<mkit_client::RequestHeaders, mkit_client::Veto> {
+        Ok(mkit_client::RequestHeaders::new())
+    }
+    fn request_timeout(&self, procedure: &str) -> Option<std::time::Duration> {
+        procedure
+            .ends_with("DownloadPack")
+            .then(|| self.remaining.get())
+    }
+}
+impl HttpTransport for LocationBudget {
+    fn supports_pack_locations(&self) -> bool {
+        true
+    }
+    async fn send(
+        &self,
+        request: Request<Vec<u8>>,
+        limit: usize,
+    ) -> Result<Response<Vec<u8>>, String> {
+        if request.uri().path().ends_with("DownloadPack") {
+            let req = proto::DownloadPackRequest::decode_from_slice(&request.body()[5..]).unwrap();
+            if req.accept_location == Some(true) {
+                self.remaining.set(self.after_rpc);
+            } else {
+                self.fallback_timeout.set(
+                    request
+                        .extensions()
+                        .get::<mkit_client::RequestTimeout>()
+                        .map(|v| v.0),
+                );
+            }
+        }
+        self.script.send(request, limit).await
+    }
+    async fn fetch_pack_location(
+        &self,
+        url: &str,
+        limit: usize,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Vec<u8>, String> {
+        std::thread::sleep(self.fetch_delay);
+        self.fetch_timeout.set(timeout);
+        self.remaining.set(self.after_fetch);
+        self.script.fetch_pack_location(url, limit, timeout).await
+    }
+}
+
+#[test]
+fn pack_location_fetch_receives_remaining_local_budget() {
+    use std::time::Duration;
+    let script = LocationBudget::new(Duration::from_millis(25), Duration::from_millis(20));
+    let client = Client::anonymous(&script, destination()).with_request_policy(&script);
+    block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)).unwrap();
+    let timeout = script.fetch_timeout.get().expect("local location budget");
+    assert!(!timeout.is_zero() && timeout <= Duration::from_millis(25));
+}
+
+#[test]
+fn exhausted_pack_location_budget_prevents_fetch_dispatch() {
+    use std::time::Duration;
+    let script = LocationBudget::new(Duration::ZERO, Duration::ZERO);
+    let client = Client::anonymous(&script, destination()).with_request_policy(&script);
+    assert!(matches!(
+        block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)),
+        Err(Error::Deadline)
+    ));
+    assert_eq!(script.script.fetches.get(), 0);
+    assert_eq!(*script.script.opt_ins.borrow(), [Some(true)]);
+}
+
+#[test]
+fn exhausted_pack_location_budget_prevents_streaming_fallback() {
+    use std::time::Duration;
+    let mut script = LocationBudget::new(Duration::from_millis(25), Duration::ZERO);
+    script.script.fetched = Err("stalled location".into());
+    let client = Client::anonymous(&script, destination()).with_request_policy(&script);
+    assert!(matches!(
+        block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)),
+        Err(Error::Deadline)
+    ));
+    assert_eq!(*script.script.opt_ins.borrow(), [Some(true)]);
+}
+
+#[test]
+fn pack_location_fallback_rechecks_remaining_local_budget() {
+    use std::time::Duration;
+    let mut script = LocationBudget::new(Duration::from_millis(25), Duration::from_millis(10));
+    script.script.fetched = Err("location failed".into());
+    let client = Client::anonymous(&script, destination()).with_request_policy(&script);
+    block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)).unwrap();
+    let timeout = script
+        .fallback_timeout
+        .get()
+        .expect("local fallback budget");
+    assert!(!timeout.is_zero() && timeout <= Duration::from_millis(10));
+    assert_eq!(*script.script.opt_ins.borrow(), [Some(true), None]);
+}
+
+#[test]
+fn pack_location_fallback_does_not_reset_a_fixed_host_budget() {
+    use std::time::Duration;
+    let budget = Duration::from_millis(20);
+    let mut script = LocationBudget::new(budget, budget);
+    script.remaining.set(budget);
+    script.fetch_delay = Duration::from_millis(30);
+    script.script.fetched = Err("stalled location".into());
+    let client = Client::anonymous(&script, destination()).with_request_policy(&script);
+    assert!(matches!(
+        block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)),
+        Err(Error::Deadline)
+    ));
+    assert_eq!(*script.script.opt_ins.borrow(), [Some(true)]);
 }

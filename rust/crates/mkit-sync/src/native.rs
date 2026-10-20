@@ -7,6 +7,8 @@
 //! build links it for pack decode; build without default features). The
 //! `connect-native` dependency gate in CI enforces that.
 
+mod location;
+
 use std::io::Write as _;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -35,6 +37,8 @@ use crate::client_source::Executor;
 pub const DEFAULT_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default wall-clock bound on pack/part transfers, response body included.
 pub const DEFAULT_TRANSFER_TIMEOUT: Duration = Duration::from_mins(5);
+
+type LocationConnector = hyper_rustls::HttpsConnector<HttpConnector<location::LocationResolver>>;
 
 type Connector = hyper_rustls::HttpsConnector<HttpConnector>;
 
@@ -158,7 +162,9 @@ pub struct NativeHttp {
     // Declared first so in-flight connection tasks drop before the runtime
     // that drives them.
     client: HyperClient<CountingConnector, NativeBody>,
-    location_client: HyperClient<Connector, NativeBody>,
+    location_client: HyperClient<LocationConnector, NativeBody>,
+    location_tls: ClientConfig,
+    allow_private_pack_locations: bool,
     connects: Arc<AtomicU64>,
     runtime: tokio::runtime::Runtime,
     metadata_timeout: Duration,
@@ -245,23 +251,14 @@ impl NativeHttp {
         // Location hosts use an independent TLS identity and connection pool.
         // Even a custom RPC TLS config with a client certificate must never
         // expose that certificate to a pack-location host.
-        let mut location_http = HttpConnector::new();
-        location_http.enforce_http(false);
-        location_http.set_nodelay(true);
-        let location_connector = HttpsConnectorBuilder::new()
-            .with_tls_config(default_tls_config()?)
-            .https_or_http()
-            .enable_http1()
-            .wrap_connector(location_http);
-        let location_client = HyperClient::builder(TokioExecutor::new())
-            .pool_max_idle_per_host(1)
-            .pool_idle_timeout(Duration::from_secs(10))
-            .pool_timer(TokioTimer::new())
-            .build(location_connector);
+        let location_tls = default_tls_config()?;
+        let location_client = location_client(location_tls.clone(), false);
         Ok(Self {
             runtime,
             client,
             location_client,
+            location_tls,
+            allow_private_pack_locations: false,
             connects,
             metadata_timeout: DEFAULT_METADATA_TIMEOUT,
             transfer_timeout: DEFAULT_TRANSFER_TIMEOUT,
@@ -302,9 +299,25 @@ impl NativeHttp {
         self
     }
 
+    /// Allow pack locations to connect to private or reserved addresses.
+    /// Off by default: only public unicast destinations are allowed. This
+    /// setting is controlled by the local caller, never by the remote.
+    /// HTTPS, response bounds and content verification remain required.
+    #[must_use]
+    pub fn allow_private_pack_locations(mut self, allow: bool) -> Self {
+        if self.allow_private_pack_locations != allow {
+            // Replacing the pool prevents a connection permitted by an earlier
+            // policy from surviving a switch back to public destinations only.
+            self.location_client = location_client(self.location_tls.clone(), allow);
+            self.allow_private_pack_locations = allow;
+        }
+        self
+    }
+
     /// Permit loopback HTTP pack locations for local conformance fixtures.
     /// Production pack locations must use HTTPS. This does not permit HTTP
     /// to any other host and is independent of the RPC cleartext setting.
+    /// Private destinations also require [`Self::allow_private_pack_locations`].
     #[doc(hidden)]
     #[must_use]
     pub fn with_test_pack_location_http(mut self, allow: bool) -> Self {
@@ -1196,6 +1209,29 @@ impl NativeHttp {
     }
 }
 
+fn location_client(
+    tls: ClientConfig,
+    allow_private: bool,
+) -> HyperClient<LocationConnector, NativeBody> {
+    let resolver = location::LocationResolver {
+        inner: hyper_util::client::legacy::connect::dns::GaiResolver::new(),
+        allow_private,
+    };
+    let mut http = HttpConnector::new_with_resolver(resolver);
+    http.enforce_http(false);
+    http.set_nodelay(true);
+    let connector = HttpsConnectorBuilder::new()
+        .with_tls_config(tls)
+        .https_or_http()
+        .enable_http1()
+        .wrap_connector(http);
+    HyperClient::builder(TokioExecutor::new())
+        .pool_max_idle_per_host(1)
+        .pool_idle_timeout(Duration::from_secs(10))
+        .pool_timer(TokioTimer::new())
+        .build(connector)
+}
+
 impl HttpTransport for NativeHttp {
     fn supports_pack_locations(&self) -> bool {
         true
@@ -1209,6 +1245,7 @@ impl HttpTransport for NativeHttp {
         &self,
         url: &str,
         response_limit: usize,
+        timeout: Option<Duration>,
     ) -> Result<Vec<u8>, String> {
         let uri: Uri = url.parse().map_err(|_| "invalid pack location URL")?;
         let authority = uri.authority().ok_or("pack location has no authority")?;
@@ -1220,6 +1257,22 @@ impl HttpTransport for NativeHttp {
             Some("http")
                 if self.test_pack_location_http && uri.host().is_some_and(is_loopback_host) => {}
             _ => return Err("pack location requires HTTPS".to_owned()),
+        }
+        // HttpConnector bypasses its resolver for literals, so apply the
+        // identical address policy here before handing them to the connector.
+        if !self.allow_private_pack_locations {
+            let host = uri.host().ok_or("pack location has no host")?;
+            if let Ok(ip) = host.trim_start_matches('[').trim_end_matches(']').parse()
+                && !location::is_public(ip)
+            {
+                return Err("pack location destination refused".to_owned());
+            }
+        }
+        let timeout = timeout.map_or(self.transfer_timeout, |bound| {
+            bound.min(self.transfer_timeout)
+        });
+        if timeout.is_zero() {
+            return Err("pack location deadline exceeded".to_owned());
         }
         // This is deliberately independent of the RPC request path: neither
         // default headers nor signed request headers reach the location host.
@@ -1256,7 +1309,7 @@ impl HttpTransport for NativeHttp {
                 .await
                 .map_err(|_| "pack location body failed or exceeded the size limit".to_owned())
         };
-        tokio::time::timeout(self.transfer_timeout, fetch)
+        tokio::time::timeout(timeout, fetch)
             .await
             .map_err(|_| "pack location deadline exceeded".to_owned())?
     }

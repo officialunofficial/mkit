@@ -19,6 +19,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 const SERVICE: &str = "/mkit.transport.v1.TransportService/";
+const DOWNLOAD_PACK: &str = "/mkit.transport.v1.TransportService/DownloadPack";
 /// Default cap on one buffered HTTP response.
 pub(crate) const RESPONSE_LIMIT: usize = 1024 * 1024;
 /// A `ListRefs` page is at most 2 MiB when encoded (SPEC-TRANSPORT-CONNECT §7.9).
@@ -57,7 +58,8 @@ pub trait HttpTransport {
 
     /// Fetch a location with a fresh credential-free GET. Never apply RPC
     /// policies, auth-v2 headers, tokens, cookies, or default credentials.
-    /// HTTPS is required; loopback HTTP is reserved for test hosts.
+    /// HTTPS is required; loopback HTTP is reserved for test hosts. The local
+    /// timeout must be clamped to the channel timeout and must not become a header.
     ///
     /// # Errors
     /// A fetch, protocol, timeout, or response-size failure.
@@ -65,6 +67,7 @@ pub trait HttpTransport {
         &self,
         _url: &str,
         _response_limit: usize,
+        _timeout: Option<Duration>,
     ) -> Result<Vec<u8>, String> {
         Err("pack locations are unsupported".into())
     }
@@ -498,6 +501,8 @@ pub(crate) struct Opts<'a> {
     pub(crate) identity: Option<&'a Identity>,
     pub(crate) hint: Option<&'a str>,
     pub(crate) limit: usize,
+    /// One local budget shared by location negotiation, fetch and streaming fallback.
+    pub(crate) local_budget: Option<(std::time::Instant, Duration)>,
     /// Present for write RPCs: what the observer is told before the attempt.
     pub(crate) intent: Option<&'a WriteIntent<'a>>,
 }
@@ -507,6 +512,7 @@ impl Default for Opts<'_> {
             identity: None,
             hint: None,
             limit: RESPONSE_LIMIT,
+            local_budget: None,
             intent: None,
         }
     }
@@ -681,9 +687,18 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     ) -> Result<(Vec<u8>, Option<Identity>), Error> {
         let lifetime = self.pack_location_lifetime().await;
         if let Some(lifetime) = lifetime {
+            let opts = Opts {
+                local_budget: self
+                    .remaining_request_timeout(DOWNLOAD_PACK, opts.local_budget)?
+                    .map(|timeout| (std::time::Instant::now(), timeout)),
+                ..opts
+            };
             if let Ok((pack, identity)) = self.download_attempt(key, cap, opts, true).await {
                 if let Some(location) = pack.location {
-                    if let Ok(bytes) = self.fetch_location(key, cap, lifetime, location).await {
+                    if let Ok(bytes) = self
+                        .fetch_location(key, cap, lifetime, location, opts.local_budget)
+                        .await
+                    {
                         return Ok((bytes, identity));
                     }
                 } else {
@@ -691,6 +706,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
                     return Ok((pack.bytes, identity));
                 }
             }
+            self.remaining_request_timeout(DOWNLOAD_PACK, opts.local_budget)?;
             // The opt-in changes the signed request body. Build and sign the
             // fallback as a separate call, retaining the caller's ref hint.
             let (pack, identity) = self
@@ -733,6 +749,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         cap: u64,
         lifetime: u64,
         location: crate::proto::DownloadPackLocation,
+        local_budget: Option<(std::time::Instant, Duration)>,
     ) -> Result<Vec<u8>, Error> {
         let size = location
             .total_bytes
@@ -765,11 +782,13 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         {
             return Err(Error::Invalid("location URL"));
         }
+        let timeout = self.remaining_request_timeout(DOWNLOAD_PACK, local_budget)?;
         let bytes = self
             .transport
             .fetch_pack_location(
                 &url,
                 usize::try_from(size).map_err(|_| Error::Limit("pack download"))?,
+                timeout,
             )
             .await
             .map_err(Error::Transport)?;
@@ -1033,7 +1052,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
             {
                 return Err(Error::Deadline);
             }
-            self.apply_request_timeout(method, &mut request)?;
+            self.apply_request_timeout(method, &mut request, opts.local_budget)?;
             if let (Some(clock), Some(identity)) = (self.unsigned_clock, identity)
                 && clock.now_ms() >= identity.expires_at_ms
             {
@@ -1045,7 +1064,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         let signed = self.sign(&procedure, commitment, opts, attempt).await?;
         let mut request = self.destination.plain_request(method, body, streaming)?;
         request.headers_mut().extend(signed.headers);
-        self.apply_request_timeout(method, &mut request)?;
+        self.apply_request_timeout(method, &mut request, opts.local_budget)?;
         Ok(Built {
             request,
             identity: Some(signed.identity),
@@ -1056,6 +1075,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         &self,
         method: &str,
         request: &mut Request<Vec<u8>>,
+        local_budget: Option<(std::time::Instant, Duration)>,
     ) -> Result<(), Error> {
         let procedure = format!("{SERVICE}{method}");
         if self
@@ -1064,16 +1084,30 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         {
             request.extensions_mut().insert(AdvertiseRequestTimeout);
         }
-        if let Some(timeout) = self
-            .request_policy
-            .and_then(|policy| policy.request_timeout(&procedure))
-        {
-            if timeout.is_zero() {
-                return Err(Error::Deadline);
-            }
+        if let Some(timeout) = self.remaining_request_timeout(&procedure, local_budget)? {
             request.extensions_mut().insert(RequestTimeout(timeout));
         }
         Ok(())
+    }
+
+    fn remaining_request_timeout(
+        &self,
+        procedure: &str,
+        local_budget: Option<(std::time::Instant, Duration)>,
+    ) -> Result<Option<Duration>, Error> {
+        let host_timeout = self
+            .request_policy
+            .and_then(|policy| policy.request_timeout(procedure));
+        let remaining =
+            local_budget.map(|(started, budget)| budget.saturating_sub(started.elapsed()));
+        let timeout = match (host_timeout, remaining) {
+            (Some(host), Some(remaining)) => Some(host.min(remaining)),
+            (host, remaining) => host.or(remaining),
+        };
+        if timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(Error::Deadline);
+        }
+        Ok(timeout)
     }
 
     async fn unsigned_metadata(

@@ -1,9 +1,11 @@
 //! Portable pack-location scenarios using negotiated disposable fixture controls.
-use super::{CaseResult, Ctx, DownloadBody, Failure, Rpc, ensure, frame, random_pack, want_ok};
-use crate::control::{self, Capabilities, PackLocationState, Request, Response};
-use crate::wire::client::{Client, Reply, StreamReply, UNARY_PROTO, decode_unary};
+use crate::control::{PackLocationState, Request};
+use crate::controlled::ControlClient;
+use crate::wire::cases::{CaseResult, Ctx, Failure, ensure, random_pack, want_ok};
+use crate::wire::client::{Client, Reply, Rpc, StreamReply, UNARY_PROTO, decode_unary, frame};
 use buffa::Message as _;
 use mkit_core::hash::{hash, to_hex};
+use mkit_transport_connect::generated::__buffa::oneof::download_pack_response::Body as DownloadBody;
 use mkit_transport_connect::generated::{
     DownloadPackLocation, DownloadPackRequest, DownloadPackResponse, GetServerInfoResponse,
 };
@@ -12,68 +14,33 @@ struct Fixture {
     repository: String,
     pack: Vec<u8>,
 }
-async fn command(ctx: &Ctx, request: &Request) -> Result<Response, Failure> {
-    let response = ctx
-        .client()
-        .post(
-            control::CONTROL_PATH,
-            "application/json",
-            &[],
-            serde_json::to_vec(request).map_err(|error| error.to_string())?,
-        )
-        .await?;
-    ensure!(
-        response.status == 200,
-        "pack-location fixture command HTTP {}",
-        response.status
-    );
-    serde_json::from_slice(&response.body).map_err(|error| error.to_string().into())
-}
-async fn fixture_now(ctx: &Ctx) -> Result<i64, Failure> {
-    command(ctx, &Request::AdvanceClock { delta_ms: 0 })
+async fn fixture_now(control: &ControlClient) -> Result<i64, Failure> {
+    control
+        .command(&Request::AdvanceClock { delta_ms: 0 })
         .await?
         .now_ms
         .ok_or_else(|| "clock control omitted current time".into())
 }
-async fn prepare(ctx: &Ctx) -> Result<Fixture, Failure> {
-    let response = ctx.client().get(control::CAPABILITIES_PATH).await?;
-    ensure!(
-        response.status == 200,
-        "pack-location controls unavailable: HTTP {}",
-        response.status
-    );
-    let capabilities: Capabilities =
-        serde_json::from_slice(&response.body).map_err(|error| error.to_string())?;
-    ensure!(
-        capabilities.version == control::VERSION,
-        "unknown fixture control version"
-    );
-    for required in ["pack-locations.fixture", "clock.advance"] {
-        ensure!(
-            capabilities
-                .controls
-                .iter()
-                .any(|control| control == required),
-            "missing declared fixture capability {required}"
-        );
-    }
+async fn prepare(ctx: &Ctx, control: &ControlClient) -> Result<Fixture, Failure> {
     let fixture = Fixture {
         repository: format!("ed25519-{}/locations", to_hex(&hash(ctx.ns().as_bytes()))),
         pack: random_pack(1024),
     };
-    set_state(ctx, &fixture, PackLocationState::Available).await?;
+    set_state(control, &fixture, PackLocationState::Available).await?;
     Ok(fixture)
 }
-async fn set_state(ctx: &Ctx, fixture: &Fixture, state: PackLocationState) -> CaseResult {
-    command(
-        ctx,
-        &Request::PackLocationFixture {
+async fn set_state(
+    control: &ControlClient,
+    fixture: &Fixture,
+    state: PackLocationState,
+) -> CaseResult {
+    control
+        .command(&Request::PackLocationFixture {
             repository: fixture.repository.clone(),
             pack: fixture.pack.clone(),
             state,
-        },
-    )
-    .await?;
+        })
+        .await?;
     Ok(())
 }
 async fn download(
@@ -128,7 +95,9 @@ async fn fetch(ctx: &Ctx, location: &DownloadPackLocation) -> Result<Reply, Fail
         .is_some_and(|ip| ip.is_loopback());
     ensure!(
         url.scheme() == "https"
-            || (ctx.profile().has(super::Feature::PackLocationFixtures)
+            || (ctx
+                .profile()
+                .has(crate::wire::Feature::PackLocationFixtures)
                 && loopback
                 && url.scheme() == "http"),
         "location must use HTTPS"
@@ -165,49 +134,16 @@ async fn info(ctx: &Ctx) -> Result<GetServerInfoResponse, Failure> {
         .await?;
     want_ok(decode_unary(&response)?, "GetServerInfo")
 }
-pub(super) async fn round_trip(ctx: Ctx) -> CaseResult {
-    let fixture = prepare(&ctx).await?;
-    let info = info(&ctx).await?;
-    ensure!(
-        info.supports_pack_locations == Some(true),
-        "location capability missing"
-    );
-    let bound = info
-        .max_pack_location_lifetime_ms
-        .filter(|bound| *bound > 0)
-        .ok_or("missing advertised lifetime")?;
-    let location = location(download(&ctx, &fixture, true).await?)?;
-    let now = fixture_now(&ctx).await?;
-    let expiry = location.expires_at_ms.ok_or("missing location expiry")?;
-    ensure!(
-        expiry > now && expiry - now <= i64::try_from(bound).unwrap_or(i64::MAX),
-        "expiry exceeds advertised bound"
-    );
-    ensure!(
-        verified(&fixture, &location, &fetch(&ctx, &location).await?),
-        "fixture location failed length/content-address verification"
-    );
-    Ok(())
-}
-pub(super) async fn no_opt_in(ctx: Ctx) -> CaseResult {
-    let fixture = prepare(&ctx).await?;
-    let response = download(&ctx, &fixture, false).await?;
-    ensure!(
-        Ctx::downloaded_bytes(&hash(&fixture.pack), response)? == fixture.pack,
-        "default streaming bytes differ"
-    );
-    Ok(())
-}
-pub(super) async fn guard_refusals(ctx: Ctx) -> CaseResult {
+pub(crate) async fn guard_refusals(ctx: Ctx, control: &ControlClient) -> CaseResult {
     for state in [
         PackLocationState::Denied,
         PackLocationState::Held,
         PackLocationState::Pending,
         PackLocationState::Private,
     ] {
-        let fixture = prepare(&ctx).await?;
+        let fixture = prepare(&ctx, control).await?;
         location(download(&ctx, &fixture, true).await?)?;
-        set_state(&ctx, &fixture, state).await?;
+        set_state(control, &fixture, state).await?;
         for accept in [false, true] {
             let response = download(&ctx, &fixture, accept).await?;
             ensure!(
@@ -223,12 +159,12 @@ pub(super) async fn guard_refusals(ctx: Ctx) -> CaseResult {
         }
     }
     // A real second repository is readable but has no membership for the first pack.
-    let source = prepare(&ctx).await?;
+    let source = prepare(&ctx, control).await?;
     let other = Fixture {
         repository: format!("{}-other", source.repository),
         pack: random_pack(1024),
     };
-    set_state(&ctx, &other, PackLocationState::Available).await?;
+    set_state(control, &other, PackLocationState::Available).await?;
     let cross_repo = Fixture {
         repository: other.repository,
         pack: source.pack,
@@ -243,8 +179,8 @@ pub(super) async fn guard_refusals(ctx: Ctx) -> CaseResult {
     );
     Ok(())
 }
-pub(super) async fn denial_after_issue_bound(ctx: Ctx) -> CaseResult {
-    let fixture = prepare(&ctx).await?;
+pub(crate) async fn denial_after_issue_bound(ctx: Ctx, control: &ControlClient) -> CaseResult {
+    let fixture = prepare(&ctx, control).await?;
     let info = info(&ctx).await?;
     ensure!(
         info.supports_pack_locations == Some(true),
@@ -253,7 +189,7 @@ pub(super) async fn denial_after_issue_bound(ctx: Ctx) -> CaseResult {
     let bound = info
         .max_pack_location_lifetime_ms
         .ok_or("missing advertised lifetime")?;
-    let now = fixture_now(&ctx).await?;
+    let now = fixture_now(control).await?;
     let location = location(download(&ctx, &fixture, true).await?)?;
     let expiry = location.expires_at_ms.ok_or("missing location expiry")?;
     ensure!(
@@ -264,13 +200,15 @@ pub(super) async fn denial_after_issue_bound(ctx: Ctx) -> CaseResult {
         verified(&fixture, &location, &fetch(&ctx, &location).await?),
         "issued location not usable"
     );
-    set_state(&ctx, &fixture, PackLocationState::Denied).await?;
+    set_state(control, &fixture, PackLocationState::Denied).await?;
     let denied = download(&ctx, &fixture, true).await?;
     ensure!(
         denied.messages.is_empty() && denied.error.is_some_and(|error| error.code == "not_found"),
         "denial did not stop new locations"
     );
-    command(&ctx, &Request::AdvanceClock { delta_ms: bound }).await?;
+    control
+        .command(&Request::AdvanceClock { delta_ms: bound })
+        .await?;
     let expired = fetch(&ctx, &location).await?;
     ensure!(
         matches!(expired.status, 403 | 404 | 410),
@@ -278,9 +216,9 @@ pub(super) async fn denial_after_issue_bound(ctx: Ctx) -> CaseResult {
     );
     Ok(())
 }
-pub(super) async fn corrupt_location_fallback(ctx: Ctx) -> CaseResult {
-    let fixture = prepare(&ctx).await?;
-    set_state(&ctx, &fixture, PackLocationState::Corrupt).await?;
+pub(crate) async fn corrupt_location_fallback(ctx: Ctx, control: &ControlClient) -> CaseResult {
+    let fixture = prepare(&ctx, control).await?;
+    set_state(control, &fixture, PackLocationState::Corrupt).await?;
     let location = location(download(&ctx, &fixture, true).await?)?;
     let corrupt = fetch(&ctx, &location).await?;
     ensure!(

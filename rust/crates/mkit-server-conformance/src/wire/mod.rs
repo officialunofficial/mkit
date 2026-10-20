@@ -216,9 +216,6 @@
 //! | `download.chunks_contiguous_ending_last` | | one header, contiguous chunks, `last` only at the end |
 //! | `pack_locations.opt_in_round_trip` | `pack-locations` | an opted-in request accepts verified streaming or a bounded single-pack location whose bytes match the pack |
 //! | `pack_locations.no_location_without_opt_in` | `pack-locations` | an unopted request retains the streaming response |
-//! | `pack_locations.guard_refusals` | `pack-locations`, `pack-location-fixtures` | denied, held, pending, private and foreign repository content never receives a location |
-//! | `pack_locations.corrupt_location_fallback` | `pack-locations`, `pack-location-fixtures` | corrupt location bytes fail verification and exactly one streaming retry returns verified bytes |
-//! | `pack_locations.denial_after_issue_bound` | `pack-locations`, `pack-location-fixtures` | denial makes an issued location unavailable within the advertised lifetime |
 //! | `health.serving` | `health` | `Check("")` and the transport service are `SERVING`, unauthenticated (no mkit spec requires health, so it is declared) |
 //! | `health.unknown_service_not_found` | `health` | |
 //! | `auth.bearer_missing_unauthenticated` | `bearer` | unary reads and writes |
@@ -462,6 +459,7 @@ pub fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::
         .iter()
         .filter(|case| {
             case.requires.contains(&Feature::MultiRepo)
+                || case.requires.contains(&Feature::PackLocations)
                 // This stable case runs on both Single and Multi profiles.
                 || case.name == "tickets.advance_ticket_bindings"
         })

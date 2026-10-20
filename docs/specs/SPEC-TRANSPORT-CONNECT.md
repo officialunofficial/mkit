@@ -871,13 +871,48 @@ A client MUST fetch a location without mkit credentials. It MUST NOT send
 auth-v2 headers, mkit bearer tokens, grants, or other mkit authentication material
 to the location host, including through redirects. It MUST verify both the
 requested pack id (content address) and exact `total_bytes` before using any
-location bytes. The caller's pack-size limits still apply. On any location
-fetch or verification failure, including an invalid location response, the
-client MUST retry once with streaming `DownloadPack` and `accept_location`
-absent or false. It MUST NOT trust or expose unverified location bytes. A
-client that cannot fetch and verify locations, including a wasm client without
-that facility, MUST leave opt-in absent or false. Clients MUST provide a
-configuration switch that disables location opt-in.
+location bytes. The caller's pack-size limits still apply.
+
+Clients SHOULD reject location destinations outside public unicast address
+space before making a connection. This includes loopback, private, link-local,
+unique-local, carrier-grade NAT, multicast, broadcast, unspecified,
+documentation, and other reserved IPv4 and IPv6 ranges. IPv4-mapped and
+IPv4-compatible IPv6 addresses require the same checks as their embedded IPv4
+addresses. The policy SHOULD filter the resolved addresses that the connector
+actually uses, including each new resolution, and check IP-literal hosts.
+Checking the URL hostname alone does not prevent DNS rebinding. A local caller
+MAY override this policy for a private pack host; remote responses MUST NOT
+control that override. Destination rejection is a location-fetch failure.
+
+A location fetch SHOULD honor the remaining local request deadline, clamped
+to the location channel's transfer timeout. This budget is local metadata and
+MUST NOT add headers to the location request. On any location fetch or
+verification failure, including an invalid location response, the client MUST
+retry once with streaming `DownloadPack` and `accept_location` absent or false,
+unless the local request deadline has expired. The client MUST check the
+remaining budget before starting that fallback. It MUST NOT trust or expose
+unverified location bytes. A client that cannot fetch and verify locations,
+including a wasm client without that facility, MUST leave opt-in absent or
+false. Clients MUST provide a configuration switch that disables location
+opt-in.
+
+**Reference-client behavior.** The native location channel uses a separate,
+credential-free HTTPS connector and rejects non-public destinations by default.
+Its filtering resolver checks connection addresses; IP literals pass the same
+policy. A local caller can allow private destinations with
+`mkit_sync::NativeHttp::allow_private_pack_locations(true)`. The channel does
+not follow redirects, requires HTTP 200 and identity content encoding, and
+bounds response bytes before pack verification. `RequestPolicy::request_timeout`
+covers the initial RPC, location fetch, and any streaming fallback. The location
+fetch receives only the remaining budget and cannot exceed its own transfer
+timeout. The wasm client continues to request streaming.
+
+**Conformance coverage.** The two ordinary location cases remain Tier 1 wire
+cases. Optional fixture cases for location security, fallback, and expiry are
+Tier 2 server-control cases. They send fixture requests through the control
+client at `control_url`, which may differ from the wire origin. A host without
+the required controls receives a declared control skip for those cases; absence
+of controls is not feature-based `NotApplicable`.
 
 ### 6.3 Streaming on Cloudflare Workers &mdash; design answer and open risk
 

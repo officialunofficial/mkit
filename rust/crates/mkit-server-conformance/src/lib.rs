@@ -16,6 +16,7 @@
 pub mod control;
 pub mod controlled;
 mod controlled_fork;
+mod controlled_pack_locations;
 mod controlled_publication;
 mod controlled_reliance;
 pub mod differential;

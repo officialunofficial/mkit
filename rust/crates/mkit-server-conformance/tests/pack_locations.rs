@@ -294,10 +294,17 @@ impl HttpTransport for Channel {
     fn allows_test_pack_location_http(&self) -> bool {
         true
     }
-    async fn fetch_pack_location(&self, url: &str, limit: usize) -> Result<Vec<u8>, String> {
-        let mut response = self
-            .0
-            .get(url)
+    async fn fetch_pack_location(
+        &self,
+        url: &str,
+        limit: usize,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Vec<u8>, String> {
+        let mut request = self.0.get(url);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        let mut response = request
             .send()
             .await
             .map_err(|e| e.to_string())?
@@ -369,7 +376,7 @@ async fn portable_pack_location_profile_exercises_all_scenarios() {
         Feature::Tickets,
     ]);
     let host = TestHost::start(profile).await.unwrap();
-    let report = run(
+    let wire = run(
         &WireTarget {
             base_url: host.base_url().parse().unwrap(),
             profile: host.profile().clone(),
@@ -377,9 +384,27 @@ async fn portable_pack_location_profile_exercises_all_scenarios() {
         Some("pack_locations."),
     )
     .await;
+    assert_eq!(wire.cases.len(), 2, "{}", wire.tap());
     for name in [
         "pack_locations.opt_in_round_trip",
         "pack_locations.no_location_without_opt_in",
+    ] {
+        assert!(
+            matches!(wire.verdict(name), Some(Verdict::Pass(_))),
+            "{}",
+            wire.tap()
+        );
+    }
+    let report = mkit_server_conformance::controlled::run(
+        &WireTarget {
+            base_url: host.base_url().parse().unwrap(),
+            profile: host.profile().clone(),
+        },
+        &std::collections::BTreeMap::default(),
+        Some("pack_locations."),
+    )
+    .await;
+    for name in [
         "pack_locations.guard_refusals",
         "pack_locations.denial_after_issue_bound",
         "pack_locations.corrupt_location_fallback",
@@ -393,6 +418,158 @@ async fn portable_pack_location_profile_exercises_all_scenarios() {
     assert!(
         !host.pack_location_fetches().1,
         "location fetch carried mkit credentials"
+    );
+    host.shutdown().await;
+}
+
+const FIXTURE_CASES: [&str; 3] = [
+    "pack_locations.guard_refusals",
+    "pack_locations.denial_after_issue_bound",
+    "pack_locations.corrupt_location_fallback",
+];
+
+async fn split_proxy(origin: &str, controls: bool) -> (url::Url, tokio::task::JoinHandle<()>) {
+    let origin = origin.to_owned();
+    let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+        let origin = origin.clone();
+        async move {
+            let is_control = request.uri().path().starts_with("/__mkit_test/v1/");
+            if is_control != controls {
+                return axum::response::Response::builder()
+                    .status(404)
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+            }
+            let (parts, body) = request.into_parts();
+            let body = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+            let mut headers = parts.headers;
+            headers.remove(http::header::HOST);
+            headers.remove(http::header::TRANSFER_ENCODING);
+            let response = reqwest::Client::new()
+                .request(parts.method, format!("{origin}{}", parts.uri))
+                .headers(headers)
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            let mut result = axum::response::Response::builder().status(response.status());
+            let mut headers = response.headers().clone();
+            // The upstream body is decoded and buffered before being forwarded.
+            headers.remove(http::header::CONTENT_LENGTH);
+            headers.remove(http::header::TRANSFER_ENCODING);
+            *result.headers_mut().unwrap() = headers;
+            result
+                .body(axum::body::Body::from(response.bytes().await.unwrap()))
+                .unwrap()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (url, task)
+}
+
+#[tokio::test]
+async fn pack_location_fixtures_use_separate_control_origin() {
+    let mut profile = Profile::new(WireAuth::AuthV2 {
+        audience: "http://placeholder.invalid".into(),
+        repository: "default".into(),
+        seed: [0x61; 32],
+    });
+    profile.features.extend([
+        Feature::PackLocations,
+        Feature::PackLocationFixtures,
+        Feature::MultiRepo,
+        Feature::IndexedMode,
+        Feature::Tickets,
+    ]);
+    let host = TestHost::start(profile).await.unwrap();
+    let (wire_url, wire_task) = split_proxy(host.base_url(), false).await;
+    let (control_url, control_task) = split_proxy(host.base_url(), true).await;
+    let target = WireTarget {
+        base_url: wire_url,
+        profile: host.profile().clone(),
+    };
+    let wire = run(&target, Some("pack_locations.")).await;
+    assert_eq!(wire.cases.len(), 2, "{}", wire.tap());
+    for name in [
+        "pack_locations.opt_in_round_trip",
+        "pack_locations.no_location_without_opt_in",
+    ] {
+        assert!(
+            matches!(wire.verdict(name), Some(Verdict::Pass(_))),
+            "{}",
+            wire.tap()
+        );
+    }
+    let report = mkit_server_conformance::controlled::run_with_control(
+        &target,
+        &control_url,
+        &std::collections::BTreeMap::default(),
+        Some("pack_locations."),
+    )
+    .await;
+    assert_eq!(report.cases.len(), 3, "{}", report.tap());
+    for name in FIXTURE_CASES {
+        assert!(
+            matches!(report.verdict(name), Some(Verdict::Pass(_))),
+            "{}",
+            report.tap()
+        );
+    }
+    wire_task.abort();
+    control_task.abort();
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn pack_location_missing_controls_require_declared_skips() {
+    use mkit_server_conformance::{controlled, test_host::ControlledHost};
+    let mut profile = Profile::new(WireAuth::AuthV2 {
+        audience: "http://placeholder.invalid".into(),
+        repository: "default".into(),
+        seed: [0x61; 32],
+    });
+    profile.features.insert(Feature::PackLocations);
+    let host = ControlledHost::start(profile).await.unwrap();
+    let target = WireTarget {
+        base_url: host.base_url().parse().unwrap(),
+        profile: host.profile().clone(),
+    };
+    let undeclared = controlled::run(
+        &target,
+        &std::collections::BTreeMap::default(),
+        Some("pack_locations."),
+    )
+    .await;
+    assert_eq!(undeclared.cases.len(), 3, "{}", undeclared.tap());
+    assert!(
+        undeclared
+            .cases
+            .iter()
+            .all(|case| matches!(case.verdict, Verdict::Fail(_))),
+        "{}",
+        undeclared.tap()
+    );
+    let skips = FIXTURE_CASES
+        .into_iter()
+        .map(|name| (name.into(), "host has no location fixture control".into()))
+        .collect();
+    let declared = controlled::run(&target, &skips, Some("pack_locations.")).await;
+    assert_eq!(declared.cases.len(), 3, "{}", declared.tap());
+    assert!(
+        declared
+            .cases
+            .iter()
+            .all(|case| matches!(case.verdict, Verdict::Skip(_))),
+        "{}",
+        declared.tap()
     );
     host.shutdown().await;
 }

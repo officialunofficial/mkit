@@ -4,13 +4,36 @@ use buffa::Message as _;
 use mkit_core::hash::hash;
 use mkit_transport_connect::generated::{DownloadPackRequest, GetServerInfoResponse};
 
-use super::{CaseResult, Commit, Ctx, DownloadBody, Rpc, ensure, frame, random_pack, want_ok};
+use super::{
+    CaseResult, Commit, Ctx, DownloadBody, Failure, Feature, Rpc, WireAuth, ensure, frame,
+    random_pack, want_ok,
+};
+
 use crate::wire::client::{Client, UNARY_PROTO, decode_unary};
 
-pub(super) async fn opt_in_round_trip(ctx: Ctx) -> CaseResult {
-    if ctx.profile().has(super::Feature::PackLocationFixtures) {
-        return super::pack_location_fixtures::round_trip(ctx).await;
+async fn prepare(mut ctx: Ctx) -> Result<(Ctx, Vec<u8>), Failure> {
+    let data = random_pack(1024);
+    if ctx.profile().has(Feature::IndexedMode) && ctx.profile().has(Feature::MultiRepo) {
+        let (pack, head, _) = super::single_file_pack(b"location.txt", &data)?;
+        let (repository, _) = super::portable_reads::publish(&ctx, &pack, head).await?;
+        let mut profile = ctx.profile().clone();
+        if let WireAuth::AuthV2 {
+            repository: current,
+            ..
+        } = &mut profile.auth
+        {
+            *current = repository;
+        }
+        profile.sign_reads = true;
+        ctx.profile = std::sync::Arc::new(profile);
+        Ok((ctx, pack))
+    } else {
+        ctx.put_pack(&data).await?;
+        Ok((ctx, data))
     }
+}
+
+pub(super) async fn opt_in_round_trip(ctx: Ctx) -> CaseResult {
     let reply = ctx
         .client()
         .post(
@@ -30,8 +53,7 @@ pub(super) async fn opt_in_round_trip(ctx: Ctx) -> CaseResult {
     );
     let bound = info.max_pack_location_lifetime_ms.unwrap_or(0);
     ensure!(bound > 0, "location lifetime bound is missing");
-    let pack = random_pack(1024);
-    ctx.put_pack(&pack).await?;
+    let (ctx, pack) = prepare(ctx).await?;
     let request = DownloadPackRequest {
         pack_id: Some(hash(&pack).to_vec()),
         accept_location: Some(true),
@@ -107,11 +129,7 @@ pub(super) async fn opt_in_round_trip(ctx: Ctx) -> CaseResult {
 }
 
 pub(super) async fn no_location_without_opt_in(ctx: Ctx) -> CaseResult {
-    if ctx.profile().has(super::Feature::PackLocationFixtures) {
-        return super::pack_location_fixtures::no_opt_in(ctx).await;
-    }
-    let pack = random_pack(1024);
-    ctx.put_pack(&pack).await?;
+    let (ctx, pack) = prepare(ctx).await?;
     let reply = ctx.download(&hash(&pack)).await?;
     ensure!(
         !reply

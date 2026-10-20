@@ -287,11 +287,12 @@ fn pack_location_fetch_never_sends_rpc_defaults_or_credentials() {
     let transport = NativeHttp::new()
         .unwrap()
         .with_test_pack_location_http(true)
+        .allow_private_pack_locations(true)
         .with_default_headers(headers);
     assert!(transport.supports_pack_locations());
     assert_eq!(
         transport
-            .block_on(transport.fetch_pack_location(&url, 4))
+            .block_on(transport.fetch_pack_location(&url, 4, None))
             .unwrap(),
         b"pack"
     );
@@ -311,7 +312,8 @@ fn pack_location_fetch_refuses_redirects_encoding_and_oversize_bodies() {
     use mkit_sync::Executor as _;
     let transport = NativeHttp::new()
         .unwrap()
-        .with_test_pack_location_http(true);
+        .with_test_pack_location_http(true)
+        .allow_private_pack_locations(true);
     for response in [
         &b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"[..],
         &b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 4\r\nConnection: close\r\n\r\npack"[..],
@@ -320,7 +322,7 @@ fn pack_location_fetch_refuses_redirects_encoding_and_oversize_bodies() {
         let (url, server) = location_response(response, std::time::Duration::ZERO);
         assert!(
             transport
-                .block_on(transport.fetch_pack_location(&url, 4))
+                .block_on(transport.fetch_pack_location(&url, 4, None))
                 .is_err()
         );
         server.join().unwrap();
@@ -335,6 +337,7 @@ fn pack_location_fetch_enforces_its_own_scheme_and_transfer_deadline() {
         .unwrap()
         .allow_insecure_http(true)
         .with_test_pack_location_http(true)
+        .allow_private_pack_locations(true)
         .with_metadata_timeout(std::time::Duration::from_secs(5))
         .with_transfer_timeout(std::time::Duration::from_millis(200));
     for url in [
@@ -345,7 +348,7 @@ fn pack_location_fetch_enforces_its_own_scheme_and_transfer_deadline() {
     ] {
         assert!(
             transport
-                .block_on(transport.fetch_pack_location(url, 4))
+                .block_on(transport.fetch_pack_location(url, 4, None))
                 .is_err(),
             "{url}"
         );
@@ -355,7 +358,7 @@ fn pack_location_fetch_enforces_its_own_scheme_and_transfer_deadline() {
         std::time::Duration::from_millis(400),
     );
     let error = transport
-        .block_on(transport.fetch_pack_location(&url, 4))
+        .block_on(transport.fetch_pack_location(&url, 4, None))
         .unwrap_err();
     assert!(error.contains("deadline"), "{error}");
     server.join().unwrap();
@@ -371,15 +374,83 @@ fn pack_location_fetch_requires_explicit_test_opt_in_for_loopback_http() {
     let transport = NativeHttp::new().unwrap().allow_insecure_http(true);
     assert!(!transport.allows_test_pack_location_http());
     let error = transport
-        .block_on(transport.fetch_pack_location(&url, 4))
+        .block_on(transport.fetch_pack_location(&url, 4, None))
         .unwrap_err();
     assert!(error.contains("HTTPS"), "{error}");
     assert_eq!(
         listener.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
-    let transport = transport.with_test_pack_location_http(true);
+    let transport = transport
+        .with_test_pack_location_http(true)
+        .allow_private_pack_locations(true);
     assert!(transport.allows_test_pack_location_http());
     let transport = transport.with_test_pack_location_http(false);
     assert!(!transport.allows_test_pack_location_http());
+}
+
+#[test]
+fn pack_location_rejects_loopback_before_connecting() {
+    use mkit_client::HttpTransport as _;
+    use mkit_sync::Executor as _;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let transport = NativeHttp::new()
+        .unwrap()
+        .with_transfer_timeout(std::time::Duration::from_millis(25));
+    let url = format!("https://{}/pack", listener.local_addr().unwrap());
+    assert!(
+        transport
+            .block_on(transport.fetch_pack_location(&url, 4, None))
+            .is_err()
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn pack_location_fetch_honors_shorter_local_budget() {
+    use mkit_client::HttpTransport as _;
+    use mkit_sync::Executor as _;
+    let transport = NativeHttp::new()
+        .unwrap()
+        .with_test_pack_location_http(true)
+        .allow_private_pack_locations(true);
+    let (url, server) = location_response(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\npack",
+        std::time::Duration::from_millis(300),
+    );
+    let start = std::time::Instant::now();
+    let result = transport.block_on(transport.fetch_pack_location(
+        &url,
+        4,
+        Some(std::time::Duration::from_millis(40)),
+    ));
+    assert!(start.elapsed() < std::time::Duration::from_millis(200));
+    assert!(result.is_err());
+    server.join().unwrap();
+}
+
+#[test]
+fn pack_location_rejects_private_literals_before_dispatch() {
+    use mkit_client::HttpTransport as _;
+    use mkit_sync::Executor as _;
+    let transport = NativeHttp::new()
+        .unwrap()
+        .with_transfer_timeout(std::time::Duration::from_millis(20));
+    for host in [
+        "127.0.0.1",
+        "10.1.2.3",
+        "169.254.1.1",
+        "[::ffff:127.0.0.1]",
+        "[::10.1.2.3]",
+    ] {
+        let url = format!("https://{host}/pack");
+        let error = transport
+            .block_on(transport.fetch_pack_location(&url, 4, None))
+            .unwrap_err();
+        assert!(error.contains("destination refused"), "{host}: {error}");
+    }
 }

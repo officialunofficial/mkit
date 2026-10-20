@@ -535,7 +535,9 @@ pub trait RequestPolicy {
 
     /// Optionally shorten the channel's per-request I/O budget. This local
     /// extension changes no headers or authenticated bytes. Hosts can clamp a
-    /// request to the remaining ticket or operation deadline.
+    /// request to the remaining ticket or operation deadline. For a negotiated
+    /// pack location, the budget covers the opted-in request, external fetch
+    /// and any streaming fallback together.
     fn request_timeout(&self, _procedure: &str) -> Option<std::time::Duration> {
         None
     }
