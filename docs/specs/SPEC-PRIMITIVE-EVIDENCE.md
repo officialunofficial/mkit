@@ -413,7 +413,9 @@ beyond its root commitments. A checkpoint exists only at a drained entry
 boundary where every buffered record sits under its sequence root and the host
 holds every page the roots reach; a machine MAY defer that work until a
 checkpoint is requested. A run that declares it will never resume MAY refuse
-checkpoints and need not hand the host any page it did not evict.
+checkpoints and need not hand the host any page it did not evict. This choice
+requires the downstream-consumer planning described under "Page lifetime" in
+§3; it does not waive the host's downstream retention obligations.
 
 Integrity-drain phase cannot produce an acceptance artifact or resume entry
 decoding. Committed occurrence, object, ordinal, head, and delta counts MUST

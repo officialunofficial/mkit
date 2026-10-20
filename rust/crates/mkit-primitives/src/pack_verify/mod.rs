@@ -182,9 +182,11 @@ pub enum Step<'a> {
     /// Backpressure until this evidence page is retained and acknowledged.
     RetainEvidence(EvidencePage<'a>),
     /// A page the host retained is no longer reachable from the driver's roots
-    /// or from its latest checkpoint; the host may drop it. No reply is needed,
-    /// and the run never asks for it again. Completion ends the obligation:
-    /// the host may discard every page of the run, released or not.
+    /// or from its latest checkpoint. No reply is needed, and the producing
+    /// driver never asks for it again. Completion ends that driver's retention
+    /// obligation for all run pages, released or not. The host may drop a page
+    /// only once every downstream consumer finishes or its needed data has been
+    /// materialized; see [`VerifiedPack`].
     ReleasePage(PageCommitment),
     /// Bounded internal progress; call again.
     Progress,

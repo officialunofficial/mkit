@@ -109,7 +109,9 @@ page sizes. A page replaced before the host ever received it is dropped
 unseen. The host receives a page when the cache evicts it, at a checkpoint,
 and, for a durable run, at completion. When the roots stop reaching a page the
 host holds, and the latest checkpoint stops reaching it too, the driver tells
-the host it may drop it. The evidence ceilings therefore count the pages the
+the host it no longer needs it. The host may drop it once downstream consumers
+also finish or their needed data has been materialized. The evidence ceilings
+therefore count the pages the
 host holds now, not every page ever produced; work stays cumulative. A run
 that is never resumed can ask for ephemeral retention, which refuses
 checkpoints and leaves the host only the pages the cache evicted. Choose this
