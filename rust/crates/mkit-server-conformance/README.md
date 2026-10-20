@@ -606,9 +606,12 @@ The coverage audit found existing one-winner and atomic-advance races,
 owner/grant/non-owner reads and URL-token visibility revocation. These seeds add
 no duplicate race/replay/privacy-only variants, URL staging or product policy.
 
-The separate `pack-location-fixtures` profile flag requires negotiated test
-controls `pack-locations.fixture` and `clock.advance`. It adds portable wire
-cases for denied, held, pending and unauthorized private content, repository
+The fixture-driven location cases require negotiated test controls
+`pack-locations.fixture` and `clock.advance` on the declared control origin
+(`control_url`). The security, fallback, and expiry cases run in Tier 2;
+missing controls require declared skips. The two ordinary location cases stay
+in Tier 1 and never invoke controls. The optional fixture controls add cases
+for denied, held, pending and unauthorized private content, repository
 isolation, denial after issue within the advertised bound, and corrupt-location
 verification followed by exactly one streaming retry. These cases use only HTTP
 and protocol identities; an external disposable server can implement the same
@@ -631,15 +634,16 @@ the server's business clock and location expiry enforcement. These controls are
 disposable test infrastructure and must never be mounted on a production server.
 
 Existing test-control implementers can retain their current handlers and report
-`pack-locations.fixture` as unsupported; enable `pack-location-fixtures` only
-when implementing this additional command. The reference test host exposes it
-only under that explicit profile flag and requires unsharded indexed Multi
-addressing with auth v2 for its security fixtures. The reference host rejects
-sharded storage for this fixture profile; external portable control
-implementations may support it using their own repository routing.
+`pack-locations.fixture` as unsupported and declare skips for the three Tier-2
+location cases. The `pack-location-fixtures` flag only enables the reference
+host fixture; external hosts can implement the controls without that flag.
+The reference test host exposes it only under that explicit profile flag and
+requires unsharded indexed Multi addressing with auth v2 for its security
+fixtures. The reference host rejects sharded storage for this fixture profile;
+external portable control implementations may support it using their own repository routing.
 
-The wire runner executes cases sequentially. The denial-after-issue probe is the
-last registered case because it advances the disposable host clock by the
+The controlled runner executes cases sequentially. The denial-after-issue probe
+is the last registered case because it advances the disposable host clock by the
 advertised lifetime. Fixture-served locations must enforce expiry against that
 same clock. The probe retains the advanced time and never resets it backwards;
 use a fresh disposable host when starting another independent full-suite run.

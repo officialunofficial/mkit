@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Reject non-public pack-location destinations in the native client before
+  connecting, including resolved hostnames and IPv4 addresses embedded in IPv6.
+  The separate location connector keeps RPC credentials off the pack host.
+  Local callers can allow private pack hosts with
+  `NativeHttp::allow_private_pack_locations(true)`. Location fetches and their
+  streaming fallback share the caller's remaining request-timeout budget.
+  Browser clients continue to stream. No wire, server issuance, refusal-code,
+  or stored-format change; no store reset.
+
+- Run optional pack-location security, fallback, and expiry fixture cases in
+  conformance Tier 2 through `control_url`, including when controls use a
+  separate origin. Missing controls produce a declared skip. The two ordinary
+  location wire cases remain in Tier 1.
+
 - Document the reference server's clearance race: a held head can remain
   advertised while live serving gates keep its bytes unavailable. Pin both
   hold/apply orders, including ref-hinted pack and object reads beyond the
@@ -80,6 +94,15 @@ every stored-format entry states whether a store reset is required. Embedders
 collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
+
+- `mkit_client::HttpTransport::fetch_pack_location` adds a local
+  `Option<Duration>` timeout argument. Migration: update custom transport
+  implementations and call sites to accept and honor the remaining request
+  budget, clamped to their location-transfer timeout; `None` keeps the
+  transport's own timeout. Do not forward this metadata as an HTTP header.
+  Native clients now reject non-public location destinations by default.
+  Migration for private pack hosts: set
+  `NativeHttp::allow_private_pack_locations(true)` locally. No store reset.
 
 - [embedder: breaking API] `mkit-primitives::ComputeConfig` adds a raw-entry
   dispatch threshold and becomes non-exhaustive. Migration: replace struct

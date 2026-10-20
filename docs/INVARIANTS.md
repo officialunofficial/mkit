@@ -14,20 +14,31 @@ read authorization, denial, takedown, and inspection checks as streaming.
 Locations require both discovery support and request opt-in, and expire within
 an advertised finite bound. Clients fetch without transport credentials and
 verify the pack content address and exact length before returning any bytes.
+The native client connects only to public unicast location destinations unless
+the local caller explicitly allows private destinations. Location fetches and
+streaming fallback remain inside the caller's local request-timeout budget.
 
 **Because:** an external pack host must not bypass repository policy or promote
 unverified bytes into the read path. Issued URLs remain usable only until their
 bounded expiry or an earlier purge.
 
 **If violated:** callers can read hidden packs, leak transport credentials, or
-consume corrupted external bytes. A deployment can promise a takedown deadline
-it cannot enforce.
+consume corrupted external bytes. A malicious remote can make a client reach
+private services, or a stalled location can outlive the caller's deadline.
+A deployment can promise a takedown deadline it cannot enforce.
 
 **Enforcement status:** `Pipeline::download` shares its read gate with location
 issuance. `PackLocationConfig` validates provider lifetime, URL, and length.
 The native channel uses a separate credential-free TLS client; the protocol
 client verifies both commitments and falls back once without location opt-in.
-The pack-location conformance profile exercises the external HTTP boundary.
+Its filtering resolver checks addresses used for connections and applies the
+same policy to IP literals and embedded IPv4 addresses. Only the local
+`NativeHttp::allow_private_pack_locations` setting bypasses this policy.
+`RequestPolicy::request_timeout` supplies the remaining location budget,
+clamped to the channel timeout, and gates streaming fallback. The pack-location
+conformance profile exercises ordinary location requests in Tier 1 and optional
+fixture controls in Tier 2 through the configured control origin. Missing
+controls produce a declared skip.
 
 ## Cached imports and gc agree on object retention
 

@@ -1223,6 +1223,7 @@ fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Name
         .iter()
         .filter(|case| {
             case.requires.contains(&Feature::MultiRepo)
+                || case.requires.contains(&Feature::PackLocations)
                 || case.name == "tickets.advance_ticket_bindings"
         })
         .flat_map(|case| {
