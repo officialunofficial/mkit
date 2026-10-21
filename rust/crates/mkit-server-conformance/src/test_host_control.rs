@@ -34,6 +34,16 @@ use reference_fork::ForkBinding;
 
 type Core = Pipeline<MemoryBlobStore, ControlStore, Hooks<TestAuthority, TestAdmission>>;
 
+/// Controls advertised only when the host runs an indexed pipeline; otherwise
+/// each is reported unsupported.
+const INDEXED_CONTROLS: &[&str] = &[
+    "observe.publication",
+    "publication.eligibility",
+    "publication.drive",
+    "fixture.indexed_refs",
+    "pause.before_published_clearance",
+];
+
 /// Disposable loopback reference server implementing the versioned test controls.
 /// Its retained-memory restart tests process-local recovery only; kill-style
 /// persistence is explicitly unsupported.
@@ -58,7 +68,24 @@ impl ControlledHost {
     ///
     /// # Errors
     /// Returns a configuration, listener, or pipeline construction error.
-    pub async fn start(mut profile: Profile) -> Result<Self, String> {
+    pub async fn start(profile: Profile) -> Result<Self, String> {
+        Self::start_with_ref_reservation(profile, true).await
+    }
+
+    /// [`Self::start`] without `fixture.ref_reservation`: the fixture grants no
+    /// separate ref reservation and does not advertise the control, mirroring
+    /// a host whose admission cannot produce one.
+    ///
+    /// # Errors
+    /// Returns a configuration, listener, or pipeline construction error.
+    pub async fn start_without_ref_reservation(profile: Profile) -> Result<Self, String> {
+        Self::start_with_ref_reservation(profile, false).await
+    }
+
+    async fn start_with_ref_reservation(
+        mut profile: Profile,
+        ref_reservation: bool,
+    ) -> Result<Self, String> {
         if profile.sharding_d34
             || profile.has(Feature::HttpObjects)
             || profile.has(Feature::Takedown)
@@ -88,7 +115,7 @@ impl ControlledHost {
         profile.server_clock = Some(clock.clone());
         profile.derive_features();
         let mut config = super::profile_config(&profile, &base_url)?;
-        let store = ControlStore::new(clock.clone());
+        let store = ControlStore::new(clock.clone(), ref_reservation);
         let authority = configure_authority(&mut profile, &mut config)?;
         let blobs = MemoryBlobStore::default();
         let core = build_core(&store, &blobs, &clock, &config)?;
@@ -100,6 +127,7 @@ impl ControlledHost {
             clock,
             config,
             authority,
+            ref_reservation,
             audience: base_url.clone(),
             core: RwLock::new(core),
             reset: Notify::new(),
@@ -257,6 +285,7 @@ struct HostState {
     clock: Arc<ManualClock>,
     config: PipelineConfig,
     authority: bool,
+    ref_reservation: bool,
     audience: String,
     core: RwLock<Arc<Core>>,
     reset: Notify,
@@ -272,10 +301,12 @@ impl HostState {
             "pause.before_acceptance",
             "pause.after_durable_acceptance_before_response",
             "fault.uncertain_result",
-            "fixture.ref_reservation",
         ]
         .map(str::to_owned)
         .to_vec();
+        if self.ref_reservation {
+            controls.push("fixture.ref_reservation".into());
+        }
         let mut unsupported = BTreeMap::from([
             (
                 "restart.kill".into(),
@@ -320,27 +351,20 @@ impl HostState {
             );
         }
         if self.config.indexed.is_some() {
-            controls.extend(
-                [
-                    "observe.publication",
-                    "publication.eligibility",
-                    "publication.drive",
-                    "fixture.indexed_refs",
-                    "pause.before_published_clearance",
-                ]
-                .map(str::to_owned),
-            );
+            controls.extend(INDEXED_CONTROLS.iter().map(|name| (*name).to_owned()));
         } else {
-            controls.push("fixture.opaque_refs".into());
-            for name in [
-                "observe.publication",
-                "publication.eligibility",
-                "publication.drive",
-                "fixture.indexed_refs",
-                "pause.before_published_clearance",
-            ] {
-                unsupported.insert(name.into(), "requires indexed publication profile".into());
+            for name in INDEXED_CONTROLS {
+                unsupported.insert(
+                    (*name).into(),
+                    "requires indexed publication profile".into(),
+                );
             }
+        }
+        if !self.ref_reservation {
+            unsupported.insert(
+                "fixture.ref_reservation".into(),
+                "fixture grants no separate ref reservation".into(),
+            );
         }
         if self.authority {
             controls.push("authority.bump".into());
@@ -1019,10 +1043,13 @@ struct ControlStore {
     // Retained test evidence for jobs the engine discards atomically with abort.
     // The reservation row, not this remembered snapshot, establishes failure.
     discarded_forks: Arc<Mutex<BTreeMap<(Partition, Key), mkit_server::fork::ForkJobV1>>>,
+    /// Whether admission grants the separate ref reservation advertised as
+    /// `fixture.ref_reservation`.
+    ref_reservation: bool,
 }
 
 impl ControlStore {
-    fn new(clock: Arc<ManualClock>) -> Self {
+    fn new(clock: Arc<ManualClock>, ref_reservation: bool) -> Self {
         Self {
             inner: Arc::new(MemoryKv::with_clock(clock)),
             gate: Arc::default(),
@@ -1035,6 +1062,7 @@ impl ControlStore {
             publication_eligibility: Arc::default(),
             fork_progress: Arc::default(),
             discarded_forks: Arc::default(),
+            ref_reservation,
         }
     }
 }
@@ -1435,7 +1463,15 @@ struct TestAdmission(ControlStore);
 impl Admission for TestAdmission {
     async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
         let decision = mkit_server::pipeline::DefaultAdmission.admit(input).await?;
-        Ok(if let Some(auth) = &input.op.auth {
+        // The fixture's separate reservation is the ref reservation only when
+        // `fixture.ref_reservation` is advertised; ticket reservations are
+        // bound by `BeginUpload` admission regardless.
+        let grants = self.0.ref_reservation
+            || !matches!(
+                input.op.kind,
+                mkit_server::OpKind::UpdateRef(_) | mkit_server::OpKind::AdvanceRefs { .. }
+            );
+        Ok(if let (Some(auth), true) = (&input.op.auth, grants) {
             let sequence = self.0.next_reservation.fetch_add(1, Ordering::Relaxed);
             let id = format!("conformance:{}:{sequence}", to_hex(&auth.replay_scope));
             self.0

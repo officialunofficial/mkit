@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Run the seven Tier-2 acceptance, recovery, replay and authority-guard
+  conformance cases on verifying hosts. Their shared fixture now publishes a
+  real commit pack and packmap node through signed, ticketed `UploadPack` and
+  `AdvanceRefs`/`UpdateRef`, so opaque and indexed hosts run one fixture
+  path. Ref-reservation assertions apply only when the host advertises
+  `fixture.ref_reservation`; every other oracle is unchanged.
+
 - Reject non-public pack-location destinations in the native client before
   connecting, including resolved hostnames and IPv4 addresses embedded in IPv6.
   The separate location connector keeps RPC credentials off the pack host.
@@ -94,6 +101,12 @@ every stored-format entry states whether a store reset is required. Embedders
 collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
+
+- The Tier-2 test-control contract drops `fixture.opaque_refs`: the seven
+  acceptance, recovery, replay and authority-guard cases no longer accept
+  opaque fixture uploads and run on any verifying host. Control bindings that
+  advertised the control should drop it; there is no alias or legacy path.
+  No wire or stored-format change.
 
 - `mkit_client::HttpTransport::fetch_pack_location` adds a local
   `Option<Duration>` timeout argument. Migration: update custom transport

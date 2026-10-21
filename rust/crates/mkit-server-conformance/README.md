@@ -294,13 +294,20 @@ the case; timers must not prune asserted evidence during an observation.
 Result classes include `advance_committed`, `update_ref_committed`, and conflict or
 rejection classes. A replay fingerprint binds the original signed request.
 
-The acceptance fixture uses opaque packs and arbitrary ref targets, advertised
-as `fixture.opaque_refs`. An indexed-only test configuration cannot advertise
-that fixture; its missing capability is a visible coverage gap. The reference
-control host supports unsharded opaque and indexed modes. The reference
-indexed configuration requires Multi addressing. Indexed profiles use
-real signed uploads and advances for publication-control fixtures. Ordinary
-indexed wire cases remain in Tier 1.
+The acceptance, recovery, replay and authority-guard fixtures publish real
+verifiable objects: a single-file commit pack and the packmap node listing
+it, uploaded through signed ticketed `UploadPack` and advanced through
+`AdvanceRefs` or `UpdateRef`. Opaque and verifying hosts share this one
+fixture path, and later targets chain real commit ancestry. Ref-reservation
+counts and states are asserted only when the host advertises
+`fixture.ref_reservation`; without it the inferred ref-reservation slot must
+be empty, since an unadvertised control cannot grant. Every other
+observation — torn-pair checks, replay state and result, memberships, ticket
+states, quota and refusal behavior — holds either way. The reference control
+host supports unsharded opaque and indexed modes. The reference indexed
+configuration requires Multi addressing. Indexed profiles use real signed
+uploads and advances for publication-control fixtures. Ordinary indexed wire
+cases remain in Tier 1.
 
 A fork fixture query contains `destination`, `signer`, and `source_head`.
 `prepare_fork` returns `fork_fixture` with the source repository and head,

@@ -6,19 +6,21 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mkit_core::hash::{hash, to_hex};
+use mkit_core::hash::{Hash, hash, to_hex};
 use mkit_transport_connect::generated::{
     AdvanceOutcome, AdvanceRefsResponse, BeginUploadRequest, BeginUploadResponse, UpdateRefResponse,
 };
 
 use crate::control::{
-    self, Capabilities, Observation, ObservationQuery, ReplayIdentity, Request, Response,
+    self, Capabilities, Observation, ObservationQuery, ReplayIdentity, Request, ReservationView,
+    Response,
 };
 use crate::wire::cases::{
-    A, B, C, Ctx, Exp, Failure, Signed, advance_req, sign_unary, update_req, upload_msgs,
+    Ctx, Exp, Failure, Signed, advance_req, chained_file_pack, sign_unary, update_req, upload_msgs,
     want_code, want_ok,
 };
 use crate::wire::client::{Client, Rpc};
+use crate::wire::sign::Signer;
 use crate::wire::{CaseReport, Feature, Report, Verdict, WireTarget};
 
 /// A negotiated test-control client. Construction does not enable routes on
@@ -291,76 +293,45 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "acceptance.before_acceptance_restart",
-        controls: &[
-            "observe",
-            "fixture.opaque_refs",
-            "restart.graceful",
-            "pause.before_acceptance",
-            "fixture.ref_reservation",
-        ],
+        controls: &["observe", "restart.graceful", "pause.before_acceptance"],
         features: ACCEPT,
     },
     Case {
         name: "acceptance.after_durable_acceptance_restart",
         controls: &[
             "observe",
-            "fixture.opaque_refs",
             "restart.graceful",
             "pause.after_durable_acceptance_before_response",
-            "fixture.ref_reservation",
         ],
         features: ACCEPT,
     },
     Case {
         name: "acceptance.after_response_restart",
-        controls: &[
-            "observe",
-            "fixture.opaque_refs",
-            "restart.graceful",
-            "fixture.ref_reservation",
-        ],
+        controls: &["observe", "restart.graceful"],
         features: ACCEPT,
     },
     Case {
         name: "acceptance.kill_recovery",
         controls: &[
             "observe",
-            "fixture.opaque_refs",
             "restart.kill",
             "pause.after_durable_acceptance_before_response",
-            "fixture.ref_reservation",
         ],
         features: ACCEPT,
     },
     Case {
         name: "recovery.uncertain_commit",
-        controls: &[
-            "observe",
-            "fixture.opaque_refs",
-            "fault.uncertain_result",
-            "fixture.ref_reservation",
-        ],
+        controls: &["observe", "fault.uncertain_result"],
         features: ACCEPT,
     },
     Case {
         name: "guard.authority_final_boundary",
-        controls: &[
-            "observe",
-            "fixture.opaque_refs",
-            "fixture.ref_reservation",
-            "authority.bump",
-            "pause.before_acceptance",
-        ],
+        controls: &["observe", "authority.bump", "pause.before_acceptance"],
         features: FENCED_ACCEPT,
     },
     Case {
         name: "replay.moves_and_generation",
-        controls: &[
-            "observe",
-            "fixture.opaque_refs",
-            "authority.bump",
-            "fixture.ref_reservation",
-        ],
+        controls: &["observe", "authority.bump"],
         features: FENCED_ACCEPT,
     },
     Case {
@@ -599,23 +570,66 @@ struct Fixture {
     ctx: Ctx,
     op: Signed,
     query: ObservationQuery,
+    tip: Hash,
+    packmap: Hash,
 }
 
-async fn fixture(ctx: Ctx) -> Result<Fixture, Failure> {
-    let signer = ctx.v2_signer("main")?;
-    let head = ctx.head("main");
-    let mut ticket_ids = Vec::new();
+/// A real advance target: a commit pack plus the packmap node listing it.
+struct Target {
+    pack: Vec<u8>,
+    node: Vec<u8>,
+    tip: Hash,
+    packmap: Hash,
+}
+
+/// Build `Target` from a real single-file pack; `parents` chain commit
+/// ancestry and `previous` chains the packmap node.
+fn target(
+    path: &[u8],
+    data: &[u8],
+    parents: &[Hash],
+    previous: Option<Hash>,
+) -> Result<Target, Failure> {
+    let (pack, tip, _) = chained_file_pack(path, data, parents)?;
+    let node = mkit_core::transfer::encode_packlist(previous, &[hash(&pack)])
+        .map_err(|e| e.to_string())?;
+    Ok(Target {
+        packmap: hash(&node),
+        node,
+        pack,
+        tip,
+    })
+}
+
+/// A signed paired advance plus the ticket IDs and pack IDs it spends.
+struct Prepared {
+    op: Signed,
+    tickets: Vec<Vec<u8>>,
+    packs: Vec<String>,
+}
+
+/// Upload `objects` through signed, ticketed `UploadPack` calls on `head`,
+/// then sign the paired advance spending them.
+async fn prepare(
+    ctx: &Ctx,
+    signer: &Signer,
+    objects: &[&Vec<u8>],
+    head: (&str, Exp<'_>, &Hash),
+    packmap: (&str, Exp<'_>, &Hash),
+) -> Result<Prepared, Failure> {
+    let (head_name, head_exp, tip) = head;
+    let (packmap_name, packmap_exp, packmap_id) = packmap;
+    let mut tickets = Vec::new();
     let mut packs = Vec::new();
-    for salt in [1_u8, 2] {
-        let pack = format!("{}:{salt}", ctx.ns()).into_bytes();
-        let pack_id = hash(&pack);
+    for bytes in objects {
+        let pack_id = hash(bytes);
         let begin = sign_unary(
-            &signer,
+            signer,
             Rpc::BeginUpload,
             &BeginUploadRequest {
-                r#ref: Some(head.clone()),
+                r#ref: Some(head_name.to_owned()),
                 pack_id: Some(pack_id.to_vec()),
-                bytes: Some(pack.len() as u64),
+                bytes: Some(bytes.len() as u64),
                 ..Default::default()
             },
             |_| {},
@@ -627,7 +641,7 @@ async fn fixture(ctx: Ctx) -> Result<Fixture, Failure> {
         let id = ticket
             .id
             .ok_or_else(|| Failure::Fail("ticket has no ID".into()))?;
-        let mut messages = upload_msgs(&pack, 1);
+        let mut messages = upload_msgs(bytes, 1);
         if let Some(
             mkit_transport_connect::generated::__buffa::oneof::upload_pack_request::Body::Header(
                 header,
@@ -636,24 +650,47 @@ async fn fixture(ctx: Ctx) -> Result<Fixture, Failure> {
         {
             header.ticket_token = ticket.token;
         }
-        let upload = signer.sign_pack(Rpc::UploadPack.procedure(), &pack_id, pack.len() as u64);
+        let upload = signer.sign_pack(Rpc::UploadPack.procedure(), &pack_id, bytes.len() as u64);
         if let Some(error) = ctx.upload_with(&messages, &upload.headers).await? {
             return Err(Failure::Fail(format!("fixture upload: {error}")));
         }
-        ticket_ids.push(id);
+        tickets.push(id);
         packs.push(to_hex(&pack_id));
     }
     let mut req = advance_req(
-        (&head, Exp::Missing, &A),
-        (&ctx.packmap("main"), Exp::Missing, &B),
+        (head_name, head_exp, tip),
+        (packmap_name, packmap_exp, packmap_id),
     );
-    req.ticket_ids.clone_from(&ticket_ids);
-    let op = sign_unary(&signer, Rpc::AdvanceRefs, &req, |_| {});
+    req.ticket_ids.clone_from(&tickets);
+    let op = sign_unary(signer, Rpc::AdvanceRefs, &req, |_| {});
+    Ok(Prepared { op, tickets, packs })
+}
+
+/// The shared acceptance fixture: one real commit pack and its packmap node,
+/// uploaded through ticketed `UploadPack` and advanced on `main`.
+async fn fixture(ctx: Ctx) -> Result<Fixture, Failure> {
+    let signer = ctx.v2_signer("main")?;
+    let head = ctx.head("main");
+    let target = target(
+        b"fixture.txt",
+        format!("{}:fixture", ctx.ns()).as_bytes(),
+        &[],
+        None,
+    )?;
+    let prepared = prepare(
+        &ctx,
+        &signer,
+        &[&target.pack, &target.node],
+        (head.as_str(), Exp::Missing, &target.tip),
+        (ctx.packmap("main").as_str(), Exp::Missing, &target.packmap),
+    )
+    .await?;
     let query = ObservationQuery {
-        repository: op.header("x-repository").into(),
+        repository: prepared.op.header("x-repository").into(),
         head,
-        replay: Some(identity(&op)),
-        ticket_ids: ticket_ids
+        replay: Some(identity(&prepared.op)),
+        ticket_ids: prepared
+            .tickets
             .iter()
             .map(|id| mkit_core::hash::to_hex_bytes(id))
             .collect(),
@@ -661,15 +698,56 @@ async fn fixture(ctx: Ctx) -> Result<Fixture, Failure> {
             signer: signer.public_key_hex(),
             window_start_ms: None,
         }),
-        packs,
+        packs: prepared.packs,
         ..Default::default()
     };
-    Ok(Fixture { ctx, op, query })
+    Ok(Fixture {
+        ctx,
+        op: prepared.op,
+        query,
+        tip: target.tip,
+        packmap: target.packmap,
+    })
 }
 
-fn consistent(snapshot: &Observation, accepted: bool) -> Result<(), Failure> {
-    let expected = accepted.then(|| to_hex(&A));
-    let packmap = accepted.then(|| to_hex(&B));
+/// Inferred reservations: each ticket's reservation, then the ref reservation
+/// bound to the replayed write. The ref reservation is asserted only when the
+/// host advertises `fixture.ref_reservation`; ticket reservations always are.
+fn reservations_consistent(
+    reservations: &[Option<ReservationView>],
+    ticket_count: usize,
+    ref_reservation: bool,
+    want: impl Fn(&ReservationView) -> bool,
+) -> bool {
+    if reservations.len() < ticket_count
+        || reservations[..ticket_count]
+            .iter()
+            .any(|r| !r.as_ref().is_some_and(&want))
+    {
+        return false;
+    }
+    if ref_reservation {
+        reservations.len() == ticket_count + 1
+            && reservations[ticket_count].as_ref().is_some_and(want)
+    } else {
+        ungranted(reservations, ticket_count)
+    }
+}
+
+/// The op-reservation slot must be empty when the host does not advertise
+/// `fixture.ref_reservation`: an unadvertised control cannot grant.
+fn ungranted(reservations: &[Option<ReservationView>], slot: usize) -> bool {
+    reservations.get(slot).is_none_or(Option::is_none)
+}
+
+fn consistent(
+    snapshot: &Observation,
+    fixture: &Fixture,
+    accepted: bool,
+    ref_reservation: bool,
+) -> Result<(), Failure> {
+    let expected = accepted.then(|| to_hex(&fixture.tip));
+    let packmap = accepted.then(|| to_hex(&fixture.packmap));
     if snapshot.head != expected || snapshot.packmap != packmap {
         return Err(Failure::Fail(format!(
             "torn or unexpected pair: {snapshot:?}"
@@ -684,14 +762,12 @@ fn consistent(snapshot: &Observation, accepted: bool) -> Result<(), Failure> {
                 .tickets
                 .iter()
                 .any(|t| t.as_ref().is_none_or(|t| t.state != "consumed"))
-            || snapshot.reservations.len() != 3
-            || snapshot.reservations.iter().any(|r| {
-                !r.as_ref()
-                    .is_some_and(|r| r.state == "committed" && r.terminal_count == 1)
+            || !reservations_consistent(&snapshot.reservations, 2, ref_reservation, |r| {
+                r.state == "committed" && r.terminal_count == 1
             })
         {
             return Err(Failure::Fail(format!(
-                "accepted state lacks replay, membership, closed tickets, or exactly three terminal responsibilities: {snapshot:?}"
+                "accepted state lacks replay, membership, closed tickets, or terminal responsibilities: {snapshot:?}"
             )));
         }
     } else if snapshot
@@ -731,10 +807,11 @@ async fn acceptance(
     control: &ControlClient,
     step: Option<&str>,
     mode: &str,
+    ref_reservation: bool,
 ) -> Result<(), Failure> {
     let fixture = fixture(ctx).await?;
     let before = control.observe(&fixture.query).await?;
-    consistent(&before, false)?;
+    consistent(&before, &fixture, false, ref_reservation)?;
     let required_commit = step != Some("before_acceptance");
     let original = if let Some(step) = step {
         control
@@ -754,7 +831,7 @@ async fn acceptance(
         });
         control.wait_paused().await?;
         let paused = control.observe(&fixture.query).await?;
-        consistent(&paused, required_commit)?;
+        consistent(&paused, &fixture, required_commit, ref_reservation)?;
         quota_consistent(
             &before,
             &paused,
@@ -768,7 +845,7 @@ async fn acceptance(
     } else {
         committed(&fixture.ctx, &fixture.op).await?;
         let accepted = control.observe(&fixture.query).await?;
-        consistent(&accepted, true)?;
+        consistent(&accepted, &fixture, true, ref_reservation)?;
         quota_consistent(&before, &accepted, true, fixture.query.quota.is_some())?;
         accepted
     };
@@ -780,14 +857,16 @@ async fn acceptance(
         &before,
         &original,
         &recovered,
+        &fixture,
         required_commit,
         fixture.query.quota.is_some(),
+        ref_reservation,
     )?;
     control.command(&Request::Resume).await?;
     let ctx = fixture.ctx.reconnect()?;
     committed(&ctx, &fixture.op).await?;
     let after = control.observe(&fixture.query).await?;
-    consistent(&after, true)?;
+    consistent(&after, &fixture, true, ref_reservation)?;
     quota_consistent(&before, &after, true, fixture.query.quota.is_some())?;
     if recovered_accepted && recovered != after {
         return Err(Failure::Fail(format!(
@@ -803,8 +882,10 @@ fn recovery_consistent(
     before: &Observation,
     original: &Observation,
     recovered: &Observation,
+    fixture: &Fixture,
     required_commit: bool,
     quota_enabled: bool,
+    ref_reservation: bool,
 ) -> Result<bool, Failure> {
     if required_commit {
         if recovered != original {
@@ -812,11 +893,13 @@ fn recovery_consistent(
                 "recovery lost or changed accepted state before replay: original={original:?}, recovered={recovered:?}"
             )));
         }
-        consistent(recovered, true)?;
+        consistent(recovered, fixture, true, ref_reservation)?;
         return Ok(true);
     }
-    if recovered.head == Some(to_hex(&A)) && recovered.packmap == Some(to_hex(&B)) {
-        consistent(recovered, true)?;
+    if recovered.head == Some(to_hex(&fixture.tip))
+        && recovered.packmap == Some(to_hex(&fixture.packmap))
+    {
+        consistent(recovered, fixture, true, ref_reservation)?;
         quota_consistent(before, recovered, true, quota_enabled)?;
         return Ok(true);
     }
@@ -826,19 +909,27 @@ fn recovery_consistent(
         || recovered.tickets != before.tickets
         || recovered.memberships != before.memberships
         || recovered.quota != before.quota
-        || recovered.reservations.len() != 3
-        || before.reservations.len() != 3
+        || recovered.reservations.len() < 2
+        || before.reservations.len() < 2
         || recovered.reservations[..2] != before.reservations[..2]
-        || original.reservations.len() != 3
-        || (original.reservations[2].is_some() && recovered.reservations[2].is_none())
-        || recovered.reservations[2]
-            .as_ref()
-            .is_some_and(|reservation| {
-                !matches!(
-                    (reservation.state.as_str(), reservation.terminal_count),
-                    ("pending", 0) | ("aborted", 1)
-                )
-            })
+        || original.reservations.len() < 2
+        || (ref_reservation
+            && (recovered.reservations.len() != 3
+                || before.reservations.len() != 3
+                || original.reservations.len() != 3
+                || (original.reservations[2].is_some() && recovered.reservations[2].is_none())
+                || recovered.reservations[2]
+                    .as_ref()
+                    .is_some_and(|reservation| {
+                        !matches!(
+                            (reservation.state.as_str(), reservation.terminal_count),
+                            ("pending", 0) | ("aborted", 1)
+                        )
+                    })))
+        || !(ref_reservation
+            || (ungranted(&recovered.reservations, 2)
+                && ungranted(&before.reservations, 2)
+                && ungranted(&original.reservations, 2)))
     {
         return Err(Failure::Fail(format!(
             "recovery exposed a partial acceptance before replay: before={before:?}, recovered={recovered:?}"
@@ -871,7 +962,11 @@ fn quota_consistent(
     Ok(())
 }
 
-async fn uncertain(ctx: Ctx, control: &ControlClient) -> Result<(), Failure> {
+async fn uncertain(
+    ctx: Ctx,
+    control: &ControlClient,
+    ref_reservation: bool,
+) -> Result<(), Failure> {
     let fixture = fixture(ctx).await?;
     control
         .command(&Request::Pause {
@@ -890,7 +985,7 @@ async fn uncertain(ctx: Ctx, control: &ControlClient) -> Result<(), Failure> {
     });
     control.wait_paused().await?;
     let before = control.observe(&fixture.query).await?;
-    consistent(&before, true)?;
+    consistent(&before, &fixture, true, ref_reservation)?;
     control.command(&Request::Resume).await?;
     let result = pending.await.map_err(|e| e.to_string())??;
     match result {
@@ -917,22 +1012,37 @@ async fn uncertain(ctx: Ctx, control: &ControlClient) -> Result<(), Failure> {
     Ok(())
 }
 
-async fn replay(ctx: Ctx, control: &ControlClient) -> Result<(), Failure> {
+async fn replay(ctx: Ctx, control: &ControlClient, ref_reservation: bool) -> Result<(), Failure> {
     let fixture = fixture(ctx).await?;
     committed(&fixture.ctx, &fixture.op).await?;
     let before = control.observe(&fixture.query).await?;
-    consistent(&before, true)?;
+    consistent(&before, &fixture, true, ref_reservation)?;
     let signer = fixture.ctx.v2_signer("main")?;
-    let later = sign_unary(
+    // The move target descends from the accepted tip and chains its packmap:
+    // a verifiable real target on any host.
+    let moved_target = target(
+        b"moved.txt",
+        format!("{}:moved", fixture.ctx.ns()).as_bytes(),
+        &[fixture.tip],
+        Some(fixture.packmap),
+    )?;
+    let later = prepare(
+        &fixture.ctx,
         &signer,
-        Rpc::AdvanceRefs,
-        &advance_req(
-            (&fixture.query.head, Exp::Match(&A), &C),
-            (&fixture.ctx.packmap("main"), Exp::Match(&B), &C),
+        &[&moved_target.pack, &moved_target.node],
+        (
+            fixture.query.head.as_str(),
+            Exp::Match(&fixture.tip),
+            &moved_target.tip,
         ),
-        |_| {},
-    );
-    committed(&fixture.ctx, &later).await?;
+        (
+            fixture.ctx.packmap("main").as_str(),
+            Exp::Match(&fixture.packmap),
+            &moved_target.packmap,
+        ),
+    )
+    .await?;
+    committed(&fixture.ctx, &later.op).await?;
     control
         .command(&Request::BumpAuthority {
             namespace: namespace(&fixture.query.repository)?.into(),
@@ -941,7 +1051,10 @@ async fn replay(ctx: Ctx, control: &ControlClient) -> Result<(), Failure> {
     let moved = control.observe(&fixture.query).await?;
     committed(&fixture.ctx, &fixture.op).await?;
     let after = control.observe(&fixture.query).await?;
-    if moved != after || after.head != Some(to_hex(&C)) || after.packmap != Some(to_hex(&C)) {
+    if moved != after
+        || after.head != Some(to_hex(&moved_target.tip))
+        || after.packmap != Some(to_hex(&moved_target.packmap))
+    {
         return Err(Failure::Fail(format!(
             "replay repeated an acceptance effect: before={moved:?}, after={after:?}"
         )));
@@ -955,21 +1068,93 @@ fn namespace(repository: &str) -> Result<&str, Failure> {
     })
 }
 
-async fn guard(ctx: Ctx, control: &ControlClient) -> Result<(), Failure> {
+/// A ticketed advance on a seed ref makes a real commit and its packmap
+/// repository members; ticketless guard operations then carry verifiable
+/// targets a verifying host accepts. The seed packmap lists the child pack
+/// too, so the head-only update's resulting pair stays covered.
+async fn guard_seed(ctx: &Ctx, signer: &Signer) -> Result<(Target, Hash, Hash), Failure> {
+    let seeded = target(
+        b"guard.txt",
+        format!("{}:guard", ctx.ns()).as_bytes(),
+        &[],
+        None,
+    )?;
+    let (child_pack, child_tip, _) = chained_file_pack(
+        b"guard-child.txt",
+        format!("{}:guard-child", ctx.ns()).as_bytes(),
+        &[seeded.tip],
+    )?;
+    let seed_node =
+        mkit_core::transfer::encode_packlist(None, &[hash(&seeded.pack), hash(&child_pack)])
+            .map_err(|e| e.to_string())?;
+    let seed_packmap = hash(&seed_node);
+    let seed = prepare(
+        ctx,
+        signer,
+        &[&seeded.pack, &child_pack, &seed_node],
+        (ctx.head("seed").as_str(), Exp::Missing, &seeded.tip),
+        (ctx.packmap("seed").as_str(), Exp::Missing, &seed_packmap),
+    )
+    .await?;
+    committed(ctx, &seed.op).await?;
+    Ok((seeded, seed_packmap, child_tip))
+}
+
+async fn guard(ctx: Ctx, control: &ControlClient, ref_reservation: bool) -> Result<(), Failure> {
     let signer = ctx.v2_signer("main")?;
+    let (seeded, seed_packmap, child_tip) = guard_seed(&ctx, &signer).await?;
     for kind in ["update", "pair", "delete"] {
-        let head = ctx.head(kind);
-        let packmap = ctx.packmap(kind);
-        if kind == "delete" {
-            let seed = sign_unary(
+        // A head-only update is judged on the resulting pair, so it moves the
+        // seeded branch head to the child the stored packmap already covers.
+        // Pair and delete writes use their own ref names.
+        let (head, packmap) = if kind == "update" {
+            (ctx.head("seed"), ctx.packmap("seed"))
+        } else {
+            (ctx.head(kind), ctx.packmap(kind))
+        };
+        let op = match kind {
+            "update" => sign_unary(
+                &signer,
+                Rpc::UpdateRef,
+                &update_req(&head, Exp::Match(&seeded.tip), &child_tip),
+                |_| {},
+            ),
+            "pair" => sign_unary(
                 &signer,
                 Rpc::AdvanceRefs,
-                &advance_req((&head, Exp::Missing, &A), (&packmap, Exp::Missing, &B)),
+                &advance_req(
+                    (&head, Exp::Any, &seeded.tip),
+                    (&packmap, Exp::Any, &seed_packmap),
+                ),
                 |_| {},
-            );
-            committed(&ctx, &seed).await?;
-        }
-        let op = guard_operation(&signer, kind, &head, &packmap);
+            ),
+            "delete" => {
+                let deleted = target(
+                    b"delete.txt",
+                    format!("{}:delete", ctx.ns()).as_bytes(),
+                    &[],
+                    None,
+                )?;
+                let seed = prepare(
+                    &ctx,
+                    &signer,
+                    &[&deleted.pack, &deleted.node],
+                    (head.as_str(), Exp::Missing, &deleted.tip),
+                    (packmap.as_str(), Exp::Missing, &deleted.packmap),
+                )
+                .await?;
+                committed(&ctx, &seed.op).await?;
+                let mut req = advance_req(
+                    (&head, Exp::Match(&deleted.tip), &deleted.tip),
+                    (&packmap, Exp::Match(&deleted.packmap), &deleted.packmap),
+                );
+                req.head_new_id = None;
+                req.packmap_new_id = None;
+                req.delete = Some(true);
+                sign_unary(&signer, Rpc::AdvanceRefs, &req, |_| {})
+            }
+            _ => unreachable!("registered guard kind"),
+        };
         let query = ObservationQuery {
             repository: op.header("x-repository").into(),
             head,
@@ -980,41 +1165,19 @@ async fn guard(ctx: Ctx, control: &ControlClient) -> Result<(), Failure> {
             }),
             ..Default::default()
         };
-        guard_refused(&ctx, control, &op, &query).await?;
+        guard_refused(&ctx, control, &op, &query, ref_reservation).await?;
     }
     // A stale final guard must also leave ticket reservations and local
     // memberships untouched, while aborting the separate ref reservation.
     let ticketed = fixture(ctx).await?;
-    guard_refused(&ticketed.ctx, control, &ticketed.op, &ticketed.query).await
-}
-
-fn guard_operation(
-    signer: &crate::wire::sign::Signer,
-    kind: &str,
-    head: &str,
-    packmap: &str,
-) -> Signed {
-    if kind == "update" {
-        return sign_unary(
-            signer,
-            Rpc::UpdateRef,
-            &update_req(head, Exp::Any, &C),
-            |_| {},
-        );
-    }
-    let mut req = advance_req((head, Exp::Any, &C), (packmap, Exp::Any, &C));
-    if kind == "delete" {
-        req.head_new_id = None;
-        req.packmap_new_id = None;
-        req.delete = Some(true);
-        req.head_expectation =
-            Some(mkit_transport_connect::generated::RefExpectation::REF_EXPECTATION_MATCH.into());
-        req.packmap_expectation =
-            Some(mkit_transport_connect::generated::RefExpectation::REF_EXPECTATION_MATCH.into());
-        req.head_expected_id = Some(A.to_vec());
-        req.packmap_expected_id = Some(B.to_vec());
-    }
-    sign_unary(signer, Rpc::AdvanceRefs, &req, |_| {})
+    guard_refused(
+        &ticketed.ctx,
+        control,
+        &ticketed.op,
+        &ticketed.query,
+        ref_reservation,
+    )
+    .await
 }
 
 async fn guard_refused(
@@ -1022,6 +1185,7 @@ async fn guard_refused(
     control: &ControlClient,
     op: &Signed,
     query: &ObservationQuery,
+    ref_reservation: bool,
 ) -> Result<(), Failure> {
     let before = control.observe(query).await?;
     control
@@ -1048,7 +1212,10 @@ async fn guard_refused(
                 .await
         }
     });
-    control.wait_paused().await?;
+    if let Err(e) = control.wait_paused().await {
+        let reply = pending.await.map_err(|e| e.to_string())?;
+        return Err(Failure::Fail(format!("{e}; guard op reply: {reply:?}")));
+    }
     control
         .command(&Request::BumpAuthority {
             namespace: namespace(&query.repository)?.into(),
@@ -1059,13 +1226,14 @@ async fn guard_refused(
     let decoded = crate::wire::client::decode_unary::<UpdateRefResponse>(&reply)?;
     want_code(decoded, "permission_denied", "authority final guard")?;
     let after = control.observe(query).await?;
-    guard_consistent(&before, &after, query.ticket_ids.len())
+    guard_consistent(&before, &after, query.ticket_ids.len(), ref_reservation)
 }
 
 fn guard_consistent(
     before: &Observation,
     after: &Observation,
     ticket_count: usize,
+    ref_reservation: bool,
 ) -> Result<(), Failure> {
     if before.head != after.head
         || before.packmap != after.packmap
@@ -1095,8 +1263,8 @@ fn guard_consistent(
             "guard fixture lacks live tickets and absent memberships: {before:?}"
         )));
     }
-    if before.reservations.len() != ticket_count + 1
-        || after.reservations.len() != ticket_count + 1
+    if before.reservations.len() < ticket_count
+        || after.reservations.len() < ticket_count
         || before.reservations[..ticket_count] != after.reservations[..ticket_count]
         || before.reservations[..ticket_count]
             .iter()
@@ -1105,11 +1273,17 @@ fn guard_consistent(
                     reservation.state == "ticketed" && reservation.terminal_count == 0
                 })
             })
-        || !after.reservations[ticket_count]
-            .as_ref()
-            .is_some_and(|reservation| {
-                reservation.state == "aborted" && reservation.terminal_count == 1
-            })
+        || (ref_reservation
+            && (before.reservations.len() != ticket_count + 1
+                || after.reservations.len() != ticket_count + 1
+                || !after.reservations[ticket_count]
+                    .as_ref()
+                    .is_some_and(|reservation| {
+                        reservation.state == "aborted" && reservation.terminal_count == 1
+                    })))
+        || !(ref_reservation
+            || (ungranted(&before.reservations, ticket_count)
+                && ungranted(&after.reservations, ticket_count)))
     {
         return Err(Failure::Fail(format!(
             "guard failure lacks unchanged ticket reservations and exactly one aborted ref reservation: before={:?}, after={:?}",
@@ -1232,11 +1406,32 @@ async fn authority_setter(
     Ok(())
 }
 
+/// The four restart/acceptance cases share one body; only the pause step and
+/// restart kind differ.
+async fn acceptance_case(
+    name: &str,
+    ctx: Ctx,
+    control: &ControlClient,
+    ref_reservation: bool,
+) -> Result<(), Failure> {
+    let (pause, restart) = match name {
+        "acceptance.before_acceptance_restart" => (Some("before_acceptance"), "graceful"),
+        "acceptance.after_durable_acceptance_restart" => {
+            (Some("after_durable_acceptance_before_response"), "graceful")
+        }
+        "acceptance.after_response_restart" => (None, "graceful"),
+        "acceptance.kill_recovery" => (Some("after_durable_acceptance_before_response"), "kill"),
+        _ => unreachable!("registered case"),
+    };
+    acceptance(ctx, control, pause, restart, ref_reservation).await
+}
+
 async fn execute_case(
     name: &str,
     ctx: Ctx,
     control: &ControlClient,
     client: &Client,
+    ref_reservation: bool,
 ) -> Result<(), Failure> {
     match name {
         "pack_locations.guard_refusals" => {
@@ -1256,31 +1451,12 @@ async fn execute_case(
         }
         "authority.setter_disabled" => authority_setter(control, client, false).await,
         "authority.setter_enabled" => authority_setter(control, client, true).await,
-        "acceptance.before_acceptance_restart" => {
-            acceptance(ctx, control, Some("before_acceptance"), "graceful").await
+        name if name.starts_with("acceptance.") => {
+            acceptance_case(name, ctx, control, ref_reservation).await
         }
-        "acceptance.after_durable_acceptance_restart" => {
-            acceptance(
-                ctx,
-                control,
-                Some("after_durable_acceptance_before_response"),
-                "graceful",
-            )
-            .await
-        }
-        "acceptance.after_response_restart" => acceptance(ctx, control, None, "graceful").await,
-        "acceptance.kill_recovery" => {
-            acceptance(
-                ctx,
-                control,
-                Some("after_durable_acceptance_before_response"),
-                "kill",
-            )
-            .await
-        }
-        "recovery.uncertain_commit" => uncertain(ctx, control).await,
-        "guard.authority_final_boundary" => guard(ctx, control).await,
-        "replay.moves_and_generation" => replay(ctx, control).await,
+        "recovery.uncertain_commit" => uncertain(ctx, control, ref_reservation).await,
+        "guard.authority_final_boundary" => guard(ctx, control, ref_reservation).await,
+        "replay.moves_and_generation" => replay(ctx, control, ref_reservation).await,
         "fork.destination_gate_before_acceptance" => {
             crate::controlled_fork::destination_gate_before_acceptance(ctx, control).await
         }
@@ -1418,8 +1594,10 @@ pub async fn run_with_control(
                         Arc::new(target.profile.clone()),
                         case.name,
                     );
+                    let ref_reservation =
+                        caps.controls.iter().any(|c| c == "fixture.ref_reservation");
                     let result = tokio::time::timeout(Duration::from_mins(1), async {
-                        execute_case(case.name, ctx, control, wire_client).await
+                        execute_case(case.name, ctx, control, wire_client, ref_reservation).await
                     })
                     .await
                     .unwrap_or_else(|_| Err(Failure::Fail("server-control case timed out".into())));
