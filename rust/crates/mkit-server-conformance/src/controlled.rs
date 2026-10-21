@@ -608,26 +608,26 @@ struct Prepared {
     packs: Vec<String>,
 }
 
-/// Upload `target`'s pack and packmap node through signed, ticketed
-/// `UploadPack` calls on `head`, then sign the paired advance spending them.
+/// Upload `objects` through signed, ticketed `UploadPack` calls on `head`,
+/// then sign the paired advance spending them.
 async fn prepare(
     ctx: &Ctx,
     signer: &Signer,
-    head: &str,
-    packmap: &str,
-    head_exp: Exp<'_>,
-    packmap_exp: Exp<'_>,
-    target: &Target,
+    objects: &[&Vec<u8>],
+    head: (&str, Exp<'_>, &Hash),
+    packmap: (&str, Exp<'_>, &Hash),
 ) -> Result<Prepared, Failure> {
+    let (head_name, head_exp, tip) = head;
+    let (packmap_name, packmap_exp, packmap_id) = packmap;
     let mut tickets = Vec::new();
     let mut packs = Vec::new();
-    for bytes in [&target.pack, &target.node] {
+    for bytes in objects {
         let pack_id = hash(bytes);
         let begin = sign_unary(
             signer,
             Rpc::BeginUpload,
             &BeginUploadRequest {
-                r#ref: Some(head.to_owned()),
+                r#ref: Some(head_name.to_owned()),
                 pack_id: Some(pack_id.to_vec()),
                 bytes: Some(bytes.len() as u64),
                 ..Default::default()
@@ -658,8 +658,8 @@ async fn prepare(
         packs.push(to_hex(&pack_id));
     }
     let mut req = advance_req(
-        (head, head_exp, &target.tip),
-        (packmap, packmap_exp, &target.packmap),
+        (head_name, head_exp, tip),
+        (packmap_name, packmap_exp, packmap_id),
     );
     req.ticket_ids.clone_from(&tickets);
     let op = sign_unary(signer, Rpc::AdvanceRefs, &req, |_| {});
@@ -680,11 +680,9 @@ async fn fixture(ctx: Ctx) -> Result<Fixture, Failure> {
     let prepared = prepare(
         &ctx,
         &signer,
-        &head,
-        &ctx.packmap("main"),
-        Exp::Missing,
-        Exp::Missing,
-        &target,
+        &[&target.pack, &target.node],
+        (head.as_str(), Exp::Missing, &target.tip),
+        (ctx.packmap("main").as_str(), Exp::Missing, &target.packmap),
     )
     .await?;
     let query = ObservationQuery {
@@ -1031,11 +1029,17 @@ async fn replay(ctx: Ctx, control: &ControlClient, ref_reservation: bool) -> Res
     let later = prepare(
         &fixture.ctx,
         &signer,
-        &fixture.query.head,
-        &fixture.ctx.packmap("main"),
-        Exp::Match(&fixture.tip),
-        Exp::Match(&fixture.packmap),
-        &moved_target,
+        &[&moved_target.pack, &moved_target.node],
+        (
+            fixture.query.head.as_str(),
+            Exp::Match(&fixture.tip),
+            &moved_target.tip,
+        ),
+        (
+            fixture.ctx.packmap("main").as_str(),
+            Exp::Match(&fixture.packmap),
+            &moved_target.packmap,
+        ),
     )
     .await?;
     committed(&fixture.ctx, &later.op).await?;
@@ -1064,32 +1068,45 @@ fn namespace(repository: &str) -> Result<&str, Failure> {
     })
 }
 
-async fn guard(ctx: Ctx, control: &ControlClient, ref_reservation: bool) -> Result<(), Failure> {
-    let signer = ctx.v2_signer("main")?;
-    // A ticketed advance on a seed ref makes a real commit and its packmap
-    // repository members; ticketless guard operations then carry verifiable
-    // targets a verifying host accepts.
+/// A ticketed advance on a seed ref makes a real commit and its packmap
+/// repository members; ticketless guard operations then carry verifiable
+/// targets a verifying host accepts. The seed packmap lists the child pack
+/// too, so the head-only update's resulting pair stays covered.
+async fn guard_seed(ctx: &Ctx, signer: &Signer) -> Result<(Target, Hash, Hash), Failure> {
     let seeded = target(
         b"guard.txt",
         format!("{}:guard", ctx.ns()).as_bytes(),
         &[],
         None,
     )?;
+    let (child_pack, child_tip, _) = chained_file_pack(
+        b"guard-child.txt",
+        format!("{}:guard-child", ctx.ns()).as_bytes(),
+        &[seeded.tip],
+    )?;
+    let seed_node =
+        mkit_core::transfer::encode_packlist(None, &[hash(&seeded.pack), hash(&child_pack)])
+            .map_err(|e| e.to_string())?;
+    let seed_packmap = hash(&seed_node);
     let seed = prepare(
-        &ctx,
-        &signer,
-        &ctx.head("seed"),
-        &ctx.packmap("seed"),
-        Exp::Missing,
-        Exp::Missing,
-        &seeded,
+        ctx,
+        signer,
+        &[&seeded.pack, &child_pack, &seed_node],
+        (ctx.head("seed").as_str(), Exp::Missing, &seeded.tip),
+        (ctx.packmap("seed").as_str(), Exp::Missing, &seed_packmap),
     )
     .await?;
-    committed(&ctx, &seed.op).await?;
+    committed(ctx, &seed.op).await?;
+    Ok((seeded, seed_packmap, child_tip))
+}
+
+async fn guard(ctx: Ctx, control: &ControlClient, ref_reservation: bool) -> Result<(), Failure> {
+    let signer = ctx.v2_signer("main")?;
+    let (seeded, seed_packmap, child_tip) = guard_seed(&ctx, &signer).await?;
     for kind in ["update", "pair", "delete"] {
-        // A head-only update is judged on the resulting pair, so it writes the
-        // seeded branch: its stored packmap already covers the target on a
-        // verifying host. Pair and delete writes use their own ref names.
+        // A head-only update is judged on the resulting pair, so it moves the
+        // seeded branch head to the child the stored packmap already covers.
+        // Pair and delete writes use their own ref names.
         let (head, packmap) = if kind == "update" {
             (ctx.head("seed"), ctx.packmap("seed"))
         } else {
@@ -1099,7 +1116,7 @@ async fn guard(ctx: Ctx, control: &ControlClient, ref_reservation: bool) -> Resu
             "update" => sign_unary(
                 &signer,
                 Rpc::UpdateRef,
-                &update_req(&head, Exp::Any, &seeded.tip),
+                &update_req(&head, Exp::Match(&seeded.tip), &child_tip),
                 |_| {},
             ),
             "pair" => sign_unary(
@@ -1107,7 +1124,7 @@ async fn guard(ctx: Ctx, control: &ControlClient, ref_reservation: bool) -> Resu
                 Rpc::AdvanceRefs,
                 &advance_req(
                     (&head, Exp::Any, &seeded.tip),
-                    (&packmap, Exp::Any, &seeded.packmap),
+                    (&packmap, Exp::Any, &seed_packmap),
                 ),
                 |_| {},
             ),
@@ -1121,11 +1138,9 @@ async fn guard(ctx: Ctx, control: &ControlClient, ref_reservation: bool) -> Resu
                 let seed = prepare(
                     &ctx,
                     &signer,
-                    &head,
-                    &packmap,
-                    Exp::Missing,
-                    Exp::Missing,
-                    &deleted,
+                    &[&deleted.pack, &deleted.node],
+                    (head.as_str(), Exp::Missing, &deleted.tip),
+                    (packmap.as_str(), Exp::Missing, &deleted.packmap),
                 )
                 .await?;
                 committed(&ctx, &seed.op).await?;
