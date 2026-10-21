@@ -173,10 +173,28 @@ async fn ordinary_test_host_does_not_mount_control_routes() {
     host.shutdown().await;
 }
 
-#[tokio::test]
-async fn controlled_reference_host_runs_the_two_tier_acceptance_cases() {
-    let mut profile = profile();
+/// The seven cases whose shared fixture publishes real verifiable objects:
+/// real commit packs and packmap nodes through signed ticketed uploads.
+const VERIFIED_CASES: &[&str] = &[
+    "acceptance.before_acceptance_restart",
+    "acceptance.after_durable_acceptance_restart",
+    "acceptance.after_response_restart",
+    "acceptance.kill_recovery",
+    "recovery.uncertain_commit",
+    "guard.authority_final_boundary",
+    "replay.moves_and_generation",
+];
+
+fn kill_recovery_skip() -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::from([(
+        "acceptance.kill_recovery".into(),
+        "reference host retains volatile memory across pipeline restart; process-kill persistence requires an external host".into(),
+    )])
+}
+
+fn authority_profile() -> Profile {
     let owner = ed25519_dalek::SigningKey::from_bytes(&[0x32; 32]);
+    let mut profile = profile();
     if let WireAuth::AuthV2 { repository, .. } = &mut profile.auth {
         *repository = format!(
             "ed25519-{}/conformance",
@@ -193,11 +211,43 @@ async fn controlled_reference_host_runs_the_two_tier_acceptance_cases() {
         .features
         .extend([Feature::MultiRepo, Feature::Tickets]);
     profile.derive_features();
-    let host = ControlledHost::start(profile).await.unwrap();
-    let skips = std::collections::BTreeMap::from([(
-        "acceptance.kill_recovery".into(),
-        "reference host retains volatile memory across pipeline restart; process-kill persistence requires an external host".into(),
-    )]);
+    profile
+}
+
+async fn run_verified_case(host: &ControlledHost, name: &str) {
+    let target = mkit_server_conformance::wire::WireTarget {
+        base_url: host.base_url().parse().expect("loopback base url parses"),
+        profile: host.profile().clone(),
+    };
+    let report =
+        mkit_server_conformance::controlled::run(&target, &kill_recovery_skip(), Some(name)).await;
+    assert!(!report.failed(), "{name}: {}", report.tap());
+    let verdict = report.verdict(name);
+    if name == "acceptance.kill_recovery" {
+        assert!(
+            matches!(
+                verdict,
+                Some(mkit_server_conformance::wire::Verdict::Skip(_))
+            ),
+            "{name}: {}",
+            report.tap()
+        );
+    } else {
+        assert!(
+            matches!(
+                verdict,
+                Some(mkit_server_conformance::wire::Verdict::Pass(_))
+            ),
+            "{name}: {}",
+            report.tap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn controlled_reference_host_runs_the_two_tier_acceptance_cases() {
+    let host = ControlledHost::start(authority_profile()).await.unwrap();
+    let skips = kill_recovery_skip();
     let target = mkit_server_conformance::wire::WireTarget {
         base_url: host.base_url().parse().unwrap(),
         profile: host.profile().clone(),
@@ -371,5 +421,44 @@ async fn opaque_host_rejects_publication_controls_before_parameter_validation() 
             .observation,
         before
     );
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn indexed_reference_host_runs_the_seven_verified_cases() {
+    let mut profile = authority_profile();
+    profile.features.insert(Feature::IndexedMode);
+    profile.derive_features();
+    let host = ControlledHost::start(profile).await.unwrap();
+    for name in VERIFIED_CASES {
+        run_verified_case(&host, name).await;
+    }
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn withheld_ref_reservation_still_runs_the_verified_cases() {
+    let host = ControlledHost::start_without_ref_reservation(authority_profile())
+        .await
+        .unwrap();
+    let response = reqwest::get(format!("{}{}", host.base_url(), control::CAPABILITIES_PATH))
+        .await
+        .unwrap();
+    let capabilities: control::Capabilities =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert!(
+        capabilities
+            .unsupported
+            .contains_key("fixture.ref_reservation")
+    );
+    assert!(
+        !capabilities
+            .controls
+            .iter()
+            .any(|name| name == "fixture.ref_reservation")
+    );
+    for name in VERIFIED_CASES {
+        run_verified_case(&host, name).await;
+    }
     host.shutdown().await;
 }

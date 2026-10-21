@@ -49,7 +49,7 @@ mod pack_locations;
 mod packs;
 mod policy;
 mod portable_reads;
-pub(crate) use portable_reads::single_file_pack;
+pub(crate) use portable_reads::{chained_file_pack, single_file_pack};
 mod quota;
 mod reads;
 mod ref_scopes;

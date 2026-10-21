@@ -245,6 +245,11 @@ struct Fixture {
 
 impl Fixture {
     fn new(files: &[(Vec<Vec<u8>>, Vec<u8>)]) -> Result<Self, Failure> {
+        Self::with_parents(files, &[])
+    }
+
+    /// `new` with commit ancestry: a real descendant target.
+    fn with_parents(files: &[(Vec<Vec<u8>>, Vec<u8>)], parents: &[Hash]) -> Result<Self, Failure> {
         let mut fixture = Self {
             writer: PackWriter::new_raw_only(),
             source: MemorySource::default(),
@@ -266,7 +271,7 @@ impl Fixture {
         let key = KeyPair::from_seed([0x34; 32]);
         let mut commit = Commit::new_unannotated(
             tree,
-            vec![],
+            parents.to_vec(),
             Identity::ed25519(key.public.0),
             key.public.0,
             b"portable files".to_vec(),
@@ -464,7 +469,17 @@ pub(super) async fn byte_names(ctx: Ctx) -> CaseResult {
 }
 
 pub(crate) fn single_file_pack(path: &[u8], data: &[u8]) -> Result<(Vec<u8>, Hash, Hash), Failure> {
-    let fixture = Fixture::new(&[(vec![path.to_vec()], data.to_vec())])?;
+    chained_file_pack(path, data, &[])
+}
+
+/// `single_file_pack` whose commit descends from `parents`: a chained
+/// target whose ancestry a verifying host can check.
+pub(crate) fn chained_file_pack(
+    path: &[u8],
+    data: &[u8],
+    parents: &[Hash],
+) -> Result<(Vec<u8>, Hash, Hash), Failure> {
+    let fixture = Fixture::with_parents(&[(vec![path.to_vec()], data.to_vec())], parents)?;
     let id = fixture.lookup(&[path.to_vec()])?;
     Ok((
         fixture.writer.finish().map_err(|e| e.to_string())?,
