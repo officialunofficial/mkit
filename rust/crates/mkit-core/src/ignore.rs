@@ -160,6 +160,9 @@ impl Pattern {
     }
 }
 
+/// Path depth `IgnoreList::is_ignored` splits without a heap allocation.
+const MAX_STACK_SEGMENTS: usize = 16;
+
 /// Parsed ignore-list (the merged `.gitignore` + `.mkitignore` patterns).
 #[derive(Debug, Default, Clone)]
 pub struct IgnoreList {
@@ -198,7 +201,24 @@ impl IgnoreList {
         if base.eq_ignore_ascii_case(".mkit") || base.eq_ignore_ascii_case(".git") {
             return true;
         }
-        let path: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+        // Split into segments on the stack: this runs once per walked entry,
+        // and a heap `Vec` here was a malloc/free pair per file. Paths
+        // deeper than the buffer (rare) spill to a `Vec`.
+        let mut buf = [""; MAX_STACK_SEGMENTS];
+        let mut n = 0;
+        let mut spill: Vec<&str> = Vec::new();
+        for seg in trimmed.split('/').filter(|s| !s.is_empty()) {
+            if n < MAX_STACK_SEGMENTS {
+                buf[n] = seg;
+                n += 1;
+            } else {
+                if spill.is_empty() {
+                    spill.extend_from_slice(&buf);
+                }
+                spill.push(seg);
+            }
+        }
+        let path: &[&str] = if spill.is_empty() { &buf[..n] } else { &spill };
         if path.is_empty() {
             return false;
         }
@@ -211,7 +231,7 @@ impl IgnoreList {
             if p.dir_only && !is_dir {
                 continue;
             }
-            if p.matches(&path) {
+            if p.matches(path) {
                 return !p.negated;
             }
         }
