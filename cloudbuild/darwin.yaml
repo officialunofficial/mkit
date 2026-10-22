@@ -1,0 +1,49 @@
+# Darwin cross-check on Cloud Build — Linux-side compile gate for the two
+# macOS release targets (aarch64-apple-darwin, x86_64-apple-darwin).
+# Cloud Build has no macOS workers, so this type-checks the macOS-gated code
+# (mkit-keystore backend-macos-keychain, mkit-cli cfg(target_os = "macos"))
+# with `cargo check --target`. It does not link and does not run tests; the
+# nightly macOS run on GitHub Actions does that.
+#
+# Trigger: mkit-darwin-{pr,main}.
+
+substitutions:
+  _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+  diskSizeGb: 100
+  dynamicSubstitutions: true
+timeout: 1800s
+
+steps:
+  - name: ${_CI_IMAGE}
+    id: darwin-check
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci-darwin"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        rustup target add aarch64-apple-darwin x86_64-apple-darwin
+        apt-get update -qq && apt-get install -y -qq python3-pip >/dev/null
+        pip install --break-system-packages -q ziglang
+        shim="$$PWD/scripts/zig-cc-darwin.sh"
+        cd rust
+        for pair in aarch64-apple-darwin:aarch64-macos x86_64-apple-darwin:x86_64-macos; do
+          t="${pair%%:*}"; z="${pair##*:}"
+          u="${t//-/_}"
+          export "CC_${u}=$shim" "ZIG_DARWIN_TARGET=$z"
+          echo "=== cargo check --target $t"
+          cargo check --target "$t" --locked -p mkit-keystore --features backend-macos-keychain
+          cargo check --target "$t" --locked -p mkit-cli --all-targets
+        done
+        sccache --show-stats
