@@ -47,9 +47,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-CI runs the above matrix on ubuntu-latest and macos-latest
-(`.github/workflows/rust.yml`). A weekly job runs `cargo audit` and
-`cargo deny check` (`.github/workflows/rust-security.yml`). Release
+CI runs the above matrix on Linux (Cloud Build, `cloudbuild/ci.yaml`) and
+macOS (`.github/workflows/native.yml`). A weekly Cloud Build job runs
+`cargo audit` and `cargo deny check` (`cloudbuild/security.yaml`). Release
 binaries are independently reproducible from the pinned toolchain and
 `Cargo.lock`; see [Reproducibility](../docs/RELEASE.md#reproducibility)
 for the verification steps.

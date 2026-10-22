@@ -26,9 +26,9 @@
 #   - cloudbuild/ci.yaml's apps/repo-worker and apps/keys-worker legs
 #     (separate Cloudflare Workers builds, own toolchain/workspace,
 #     including their wasm32 cargo builds).
-#   - rust.yml's keystore-backends matrix (2-OS native keystore backends —
-#     stays workflow_dispatch-only by design; run it on GitHub, not here).
-#   - web.yml's wasm-pack bundler smoke and bun test/lint/build.
+#   - native.yml's keystore-backends matrix (2-OS native keystore backends —
+#     runs nightly on GitHub, not here).
+#   - cloudbuild/ts.yaml's wasm-pack bundler smoke and bun test/lint/build.
 #
 # Usage: `just ci` for the host-appropriate subset, or `just ci-linux` /
 # `just ci-macos` / `just ci-security` / `just ci-docs` /
@@ -96,7 +96,7 @@ ci-macos:
     ( cd contrib/signers && cargo nextest run --locked --all-features )
     # macOS runners always have `git` on PATH — MKIT_TEST_STRICT=1 makes
     # git-dependent tests fail loudly instead of silently skipping if it's
-    # missing here too. See rust.yml's "Test (nextest)" step comment.
+    # missing here too. See cloudbuild/ci.yaml's nextest step comment.
     ( cd rust && MKIT_TEST_STRICT=1 cargo nextest run --locked --workspace --all-features )
     # Indexed verification with one Extract step per slice (default chains).
     ( cd rust && MKIT_TEST_EXTRACT_CHAIN=1 cargo nextest run --locked -p mkit-server --all-features -E 'test(~indexed::)' )

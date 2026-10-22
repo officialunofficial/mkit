@@ -248,7 +248,7 @@ the Actions tab self-groups: `CI:` (build/test/lint/coverage/docs), `Security:`,
 
 | Workflow | Triggers | Notes |
 |----------|----------|-------|
-| `CI: Rust` | every PR; push `main`¹ | Linux build/test/clippy/fmt run on every PR (Cloud Build, see below), as does a Darwin type-check for `aarch64-apple-darwin` and `x86_64-apple-darwin` (`cloudbuild/darwin.yaml`). `rust.yml` keeps the server feature-combination and patch API checks, and a `ci-gate` job aggregates them into one required check. |
+| `Cloud Build` | every PR; push `main` | Rust, server, supply, meta, TypeScript and Darwin type-check shards run on Cloud Build (`cloudbuild/`). See `cloudbuild/README.md`. |
 | `CI: Native` | push `main` (path-filtered); nightly; manual | Runs the macOS build/test leg and the keystore backend matrix. It has no `pull_request` trigger because macOS minutes cost 10x. |
 | `CI: Coverage` | every PR; push `main`¹ | `cargo-llvm-cov` → Codecov |
 | `CI: Docs` | every PR | rustdoc broken-link gate (`-D warnings`) |
