@@ -39,7 +39,15 @@ RUN curl -sSL -o /tmp/protoc.zip \
 # rustfmt + clippy (lints), llvm-tools-preview (coverage.yaml's cargo-llvm-cov),
 # and the wasm32 target (codegen.yaml's repo-worker regen builds for wasm32).
 RUN rustup component add rustfmt clippy llvm-tools-preview \
-    && rustup target add wasm32-unknown-unknown
+    && rustup target add wasm32-unknown-unknown aarch64-apple-darwin x86_64-apple-darwin
+
+# zig as a C cross-compiler for the Darwin type-check (darwin.yaml). C build
+# scripts (blake3, zstd-sys) need a compiler that targets macOS; zig ships the
+# Darwin headers, so no Apple SDK is needed. scripts/zig-cc-darwin.sh wraps it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3-pip \
+    && pip install --break-system-packages ziglang \
+    && rm -rf /var/lib/apt/lists/*
 
 # Prebuilt tool binaries via cargo-binstall, resolved ONCE here and baked.
 # Every PR then uses this identical image, so versions are reproducible across

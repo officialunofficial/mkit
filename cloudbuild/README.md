@@ -24,7 +24,9 @@ GKE-deploy half**. These stay on GitHub Actions:
   `release-plz.yml` (CLI binaries, cosign, crates.io, npm).
 - **Cross-platform legs Cloud Build (Linux-only) can't run:** the macOS leg of
   `build-and-test` and the `keystore-backends` matrix (Linux/macOS native
-  keystores) in `rust.yml`. Windows is not a supported target (MKIT-6; see
+  keystores) in `native.yml`. They run on push to `main` (path-filtered) and
+  nightly, never on a pull request. `darwin.yaml` type-checks the same code
+  on every PR. Windows is not a supported target (MKIT-6; see
   `docs/INVARIANTS.md`).
 - **TS/wasm app validation:** `web.yml`, `mcp.yml`, `actionlint.yml`.
 
@@ -46,6 +48,7 @@ layout.
 | `geiger.yaml` | retired from GitHub Actions, Cloud Build only | `scripts/check-geiger-baseline.sh`. |
 | `connect-latest.yaml` | GitHub latest-patch Connect stack probe reproduction | Same bounded update/build/test script, including both client wasm builds; automatic runs use the scheduled and manifest/lockfile PR workflow. |
 | `commonware-latest.yaml` | GitHub latest-release probe reproduction | Same bounded update/build/test script; automatic runs use the scheduled and path-filtered GitHub workflow to avoid duplicate PR builds. |
+| `darwin.yaml` | new (no GitHub equivalent) | `cargo check` for `aarch64-apple-darwin` and `x86_64-apple-darwin` on Linux. `scripts/zig-cc-darwin.sh` lets `zig cc` compile the C build scripts (blake3, zstd-sys). It does not link or run tests. |
 | `coverage.yaml` | retired from GitHub Actions, Cloud Build only | llvm-cov → lcov → Codecov (main only, non-fatal). |
 
 ## Triggers
@@ -62,6 +65,7 @@ needs a maintainer **`/gcbrun`** only for external/fork PRs. See
 | `mkit-security-{pr,main}` | `security.yaml` | collaborators auto |
 | `mkit-docs-{pr,main}` | `docs.yaml` | collaborators auto |
 | `mkit-geiger-{pr,main}` | `geiger.yaml` | collaborators auto |
+| `mkit-darwin-{pr,main}` | `darwin.yaml` | collaborators auto; path-filtered to Rust, signer, and image files |
 | `mkit-coverage-main` | `coverage.yaml` | main push only |
 
 ## Test compilation memory

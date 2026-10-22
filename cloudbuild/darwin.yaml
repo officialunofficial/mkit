@@ -5,6 +5,9 @@
 # with `cargo check --target`. It does not link and does not run tests; the
 # nightly macOS run on GitHub Actions does that.
 #
+# Toolchain: the Darwin rustup targets and zig come from the baked _CI_IMAGE
+# (cloudbuild/Dockerfile.ci); scripts/zig-cc-darwin.sh adapts cc-rs flags.
+#
 # Trigger: mkit-darwin-{pr,main}.
 
 substitutions:
@@ -33,9 +36,6 @@ steps:
       - -c
       - |
         set -euo pipefail
-        rustup target add aarch64-apple-darwin x86_64-apple-darwin
-        apt-get update -qq && apt-get install -y -qq python3-pip >/dev/null
-        pip install --break-system-packages -q ziglang
         shim="$$PWD/scripts/zig-cc-darwin.sh"
         cd rust
         for pair in aarch64-apple-darwin:aarch64-macos x86_64-apple-darwin:x86_64-macos; do

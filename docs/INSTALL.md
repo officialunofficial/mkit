@@ -314,7 +314,7 @@ mkit 0.5.0
 
 The exact format `mkit <X.Y.Z>\n` (no extra whitespace, no banner) is
 contract-tested in
-[`.github/workflows/rust.yml`](../.github/workflows/rust.yml) under the
+[`.github/workflows/native.yml`](../.github/workflows/native.yml) under the
 `Version contract` step &mdash; if you ever see anything else, the binary
 on your `PATH` is not a release build of this repo.
 

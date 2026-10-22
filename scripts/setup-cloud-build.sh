@@ -135,6 +135,14 @@ mk_push mkit-docs-main --build-config=cloudbuild/docs.yaml \
 mk_pr   mkit-geiger-pr   --build-config=cloudbuild/geiger.yaml --comment-control="$COL"
 mk_push mkit-geiger-main --build-config=cloudbuild/geiger.yaml
 
+# Darwin type-check (aarch64 + x86_64): path-gated to the macOS-specific code
+# and the dependency graph. The macOS runtime tests run nightly on GitHub.
+DARWIN_FILES='rust/Cargo.lock','rust/Cargo.toml','rust/rust-toolchain.toml','rust/crates/**','contrib/signers/**','cloudbuild/darwin.yaml','cloudbuild/Dockerfile.ci','scripts/zig-cc-darwin.sh'
+mk_pr   mkit-darwin-pr   --build-config=cloudbuild/darwin.yaml \
+        --comment-control="$COL" --included-files="$DARWIN_FILES"
+mk_push mkit-darwin-main --build-config=cloudbuild/darwin.yaml \
+        --included-files="$DARWIN_FILES"
+
 # Coverage: informational, main pushes only (does not gate PRs).
 mk_push mkit-coverage-main --build-config=cloudbuild/coverage.yaml
 
