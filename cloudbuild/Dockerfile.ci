@@ -58,3 +58,25 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf \
     && cargo binstall -y \
         cargo-nextest sccache cargo-deny cargo-audit cargo-llvm-cov cargo-geiger@0.13.0 \
     && rm -rf "${CARGO_HOME:-/usr/local/cargo}/registry"
+
+# Tools for the migrated GitHub workflows (server shard, TypeScript apps, meta
+# checks). Pinned to the versions the old workflows used.
+#   node 22, bun 1.3.14   → apps/web, apps/mcp, apps/og, workers
+#   buf 1.66.0            → proto lint/breaking (matches the old proto.yml)
+#   actionlint            → .github/workflows lint
+#   wasm-pack 0.13.1, cargo-hack, just, cargo-semver-checks, cargo-mutants
+ARG NODE_VERSION=22.12.0
+ARG BUN_VERSION=1.3.14
+ARG BUF_VERSION=1.66.0
+ARG ACTIONLINT_VERSION=1.7.7
+RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+        | tar -xJ -C /usr/local --strip-components=1 \
+    && curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" -o /tmp/bun.zip \
+    && unzip -q -o /tmp/bun.zip -d /tmp/bun && install -m 0755 /tmp/bun/bun-linux-x64/bun /usr/local/bin/bun \
+    && curl -fsSL "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-x86_64" -o /usr/local/bin/buf \
+    && chmod +x /usr/local/bin/buf \
+    && curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+        | tar -xz -C /usr/local/bin actionlint \
+    && rm -rf /tmp/bun /tmp/bun.zip
+RUN cargo binstall -y wasm-pack@0.13.1 cargo-hack just cargo-semver-checks cargo-mutants \
+    && rm -rf "${CARGO_HOME:-/usr/local/cargo}/registry"
