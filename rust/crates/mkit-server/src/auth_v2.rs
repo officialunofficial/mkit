@@ -75,6 +75,7 @@ impl AuthV2Config {
 /// or undecodable value counts (adapters fail closed, mapping bad bytes to
 /// a value). SPEC-TRANSPORT-CONNECT §7.1: a signed read verifies in full;
 /// it never falls back to anonymous.
+#[cfg(feature = "connect")]
 pub(crate) fn carries_auth_headers(get: impl Fn(&str) -> Option<String>) -> bool {
     mkit_primitives::auth::TRIGGER_HEADER_NAMES
         .iter()

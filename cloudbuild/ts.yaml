@@ -1,0 +1,214 @@
+# TypeScript and Worker gates on Cloud Build. Replaces these GitHub workflows:
+#   web.yml, mcp.yml, og.yml, spammer-worker.yml, workers.yml.
+# Each app runs as one parallel step (all wait only for the quick snapshot step) with its own working dirs.
+# The GitHub "changes" and "*-gate" jobs are gone. Trigger path filters replace them.
+#
+# The image bakes in rust, wasm32, protoc, node 22, bun, buf and wasm-pack.
+# Steps need no secret and make no live Cloudflare call. `wrangler deploy
+# --dry-run` only bundles.
+#
+# Each step has its own CARGO_TARGET_DIR. Parallel cargo runs then do not
+# block each other on one target lock. sccache shares compiled crates.
+#
+# scripts/check-generated-fresh-ts.sh diffs with `git status`. A manual
+# `gcloud builds submit` ships no .git, so the web step makes a baseline
+# repo first. A GitHub trigger already has .git, so the step skips this.
+#
+# Triggers: see cloudbuild/README.md (mkit-web, mkit-mcp, mkit-og,
+# mkit-spammer-worker, mkit-workers).
+
+substitutions:
+  _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+
+options:
+  # A custom trigger service account needs an explicit log option.
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 200
+  dynamicSubstitutions: true
+timeout: 3600s
+
+steps:
+  # web and spammer-worker both rewrite apps/web/vendor (wasm pkg, generated
+  # TS). Spammer runs on a private copy taken before web starts.
+  - name: ${_CI_IMAGE}
+    id: snapshot
+    waitFor: ['-']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        mkdir -p /workspace/.snap/spammer
+        tar --exclude=./.snap --exclude=./.target -cf - . | tar -xf - -C /workspace/.snap/spammer
+
+  # ---- apps/web (web.yml) ----
+  - name: ${_CI_IMAGE}
+    id: web
+    waitFor: ['snapshot']
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/workspace/.target/web"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        # Baseline repo for the git-status freshness check (no .git on manual submit).
+        if ! git rev-parse --git-dir >/dev/null 2>&1; then
+          rm -rf .git
+          git init -q
+          # Other parallel steps write these dirs. Keep them out of the baseline.
+          printf '.target/\n.snap/\nnode_modules/\n' >> .git/info/exclude
+          git add -A
+          git -c user.name=ci -c user.email=ci@example.invalid commit -q -m baseline
+        fi
+        cd apps/web
+        bun install --frozen-lockfile
+        bun run wasm:build
+        cd /workspace
+        ./scripts/check-generated-fresh-ts.sh
+        cd apps/web
+        bun run typecheck
+        bun run test --coverage
+        bun run lint
+        bun run fmt:check
+        bun run build
+        # Bundler-target smoke build: the npm package ships this shape.
+        cd /workspace/rust
+        wasm-pack build crates/mkit-wasm --release --target bundler --out-dir pkg-bundler
+        node ../scripts/patch-wasm-bundler-glue.mjs crates/mkit-wasm/pkg-bundler
+        sccache --show-stats
+
+  # ---- apps/mcp (mcp.yml) ----
+  - name: ${_CI_IMAGE}
+    id: mcp
+    waitFor: ['snapshot']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd apps/mcp
+        npm ci
+        npm run index
+        npm run build
+        npm run test
+        # Unit project only. The Workers-runtime project cannot run v8 coverage.
+        npm run test:coverage
+
+  # ---- apps/og (og.yml) ----
+  - name: ${_CI_IMAGE}
+    id: og
+    waitFor: ['snapshot']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd apps/og
+        bun install --frozen-lockfile
+        bun run typecheck
+        bun run test:coverage
+
+  # ---- apps/spammer-worker (spammer-worker.yml) ----
+  - name: ${_CI_IMAGE}
+    id: spammer-worker
+    waitFor: ['snapshot']
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/workspace/.target/spammer"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd /workspace/.snap/spammer/apps/spammer-worker
+        bun run wasm:build
+        bun install --frozen-lockfile
+        bun run typecheck
+        bun run test:coverage
+        # wrangler deploy --dry-run
+        bun run build
+
+  # ---- Rust worker crates (workers.yml job "ci") ----
+  - name: ${_CI_IMAGE}
+    id: workers-rust
+    waitFor: ['snapshot']
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/workspace/.target/workers-rust"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        (cd apps/repo-worker && buf lint)
+        for crate in mkit-worker-common repo-worker keys-worker; do
+          echo "=== $$crate ==="
+          cd /workspace/apps/$$crate
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          if [ "$$crate" = mkit-worker-common ]; then cargo test; else cargo test --lib; fi
+          # repo-worker wasm32 build is covered by cloudbuild/codegen.yaml.
+          if [ "$$crate" != repo-worker ]; then
+            cargo build --target wasm32-unknown-unknown
+          fi
+        done
+        sccache --show-stats
+
+  # ---- apps/workspace-worker (workers.yml job "workspace") ----
+  - name: ${_CI_IMAGE}
+    id: workers-workspace
+    waitFor: ['snapshot']
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/workspace/.target/workspace"
+      - "WRANGLER_SEND_METRICS=false"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd apps/workspace-worker
+        npm ci
+        cd /workspace
+        wasm-pack build rust/crates/mkit-wasm --release --target web --out-dir /workspace/apps/workspace-worker/vendor/mkit-wasm
+        cd apps/workspace-worker
+        npm run types
+        npm run typecheck
+        npm test
+        # wrangler builds the Sandbox image, so it needs a Docker CLI. The image
+        # has none. Cloud Build mounts the daemon socket, so a static CLI is enough.
+        curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
+          | tar -xz -C /usr/local/bin --strip-components=1 docker/docker
+        # wrangler runs `docker build --load`, which needs the buildx plugin.
+        mkdir -p /usr/local/lib/docker/cli-plugins
+        curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-buildx \
+          https://github.com/docker/buildx/releases/download/v0.19.3/buildx-v0.19.3.linux-amd64
+        chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+        docker version
+        # Bundle and container image dry run. No deploy, no secret.
+        npm run build
+        sccache --show-stats

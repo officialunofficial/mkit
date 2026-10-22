@@ -1,0 +1,77 @@
+# Small repo-hygiene checks on Cloud Build. This config replaces three
+# GitHub workflows:
+#   - .github/workflows/docs-lint.yml          (SPEC status frontmatter)
+#   - .github/workflows/crypto-stack-version.yml
+#   - .github/workflows/actionlint.yml
+# All checks are text or lint only. They need no compile step, so a small
+# machine and no cache are enough. The steps run in parallel.
+#
+# actionlint, shellcheck, jq and python3 are baked into _CI_IMAGE
+# (cloudbuild/Dockerfile.ci). actionlint reads .github/workflows. Keep those
+# files in the repo until the last GitHub workflow is gone.
+#
+# Trigger: mkit-meta-{pr,main}. Use the union of the three old paths filters
+# (see the final report for the glob list).
+
+substitutions:
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+
+options:
+  # The trigger runs this config as a dedicated service account. Cloud Build
+  # rejects a custom account with no log option.
+  logging: CLOUD_LOGGING_ONLY
+  dynamicSubstitutions: true
+timeout: 600s
+
+steps:
+  - name: ${_CI_IMAGE}
+    id: spec-status
+    waitFor: ['-']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        bash scripts/check-spec-status.sh
+
+  - name: ${_CI_IMAGE}
+    id: crypto-stack-version
+    waitFor: ['-']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        bash scripts/check-crypto-stack-version.sh
+
+  - name: ${_CI_IMAGE}
+    id: actionlint
+    waitFor: ['-']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        actionlint --version
+        # Keep shellcheck at error severity. This matches actionlint.yml.
+        actionlint -color -shellcheck="shellcheck -S error"
+
+  - name: ${_CI_IMAGE}
+    id: dependabot-coverage
+    waitFor: ['-']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        bash scripts/check-dependabot-coverage.sh
+
+  - name: ${_CI_IMAGE}
+    id: no-windows-target
+    waitFor: ['-']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        bash scripts/check-no-windows-target.sh

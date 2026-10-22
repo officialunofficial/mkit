@@ -111,7 +111,7 @@ mk_push mkit-ci-main --build-config=cloudbuild/ci.yaml \
 # output — protos, build.rs, the regen scripts, the committed generated/ trees,
 # AND the inputs that silently drive codegen: Cargo.lock (the buffa-build /
 # connectrpc-build crate versions) and Dockerfile.ci (the baked protoc version).
-CODEGEN_FILES='**/*.proto','**/build.rs','**/Cargo.lock','buf.yaml','cloudbuild/Dockerfile.ci','scripts/regen-rpc-proto.sh','scripts/regen-repo-proto.sh','scripts/regen-transport-proto.sh','scripts/regen-hooks-proto.sh','scripts/check-generated-fresh.sh','**/generated/**'
+CODEGEN_FILES='**/*.proto','**/build.rs','**/Cargo.lock','buf.yaml','cloudbuild/Dockerfile.ci','scripts/regen-rpc-proto.sh','scripts/regen-repo-proto.sh','scripts/regen-transport-proto.sh','scripts/regen-hooks-proto.sh','scripts/check-generated-fresh.sh','**/generated/**','**/buf.yaml','scripts/check-server-hooks-goldens.sh','rust/tests/golden/server-hooks/**'
 mk_pr   mkit-codegen-pr   --build-config=cloudbuild/codegen.yaml \
         --comment-control="$COL" --included-files="$CODEGEN_FILES"
 mk_push mkit-codegen-main --build-config=cloudbuild/codegen.yaml \
@@ -142,6 +142,37 @@ mk_pr   mkit-darwin-pr   --build-config=cloudbuild/darwin.yaml \
         --comment-control="$COL" --included-files="$DARWIN_FILES"
 mk_push mkit-darwin-main --build-config=cloudbuild/darwin.yaml \
         --included-files="$DARWIN_FILES"
+
+# Server shard (primitives, server clippy powerset, wire conformance, semver,
+# wasm client): path-gated to Rust and the server specs.
+SERVER_FILES='rust/**','scripts/**','docs/specs/SPEC-SERVER.md','docs/specs/SPEC-TRANSPORT-CONNECT.md','cloudbuild/server.yaml'
+mk_pr   mkit-server-pr   --build-config=cloudbuild/server.yaml \
+        --comment-control="$COL" --included-files="$SERVER_FILES"
+mk_push mkit-server-main --build-config=cloudbuild/server.yaml \
+        --included-files="$SERVER_FILES"
+
+# Supply files (third-party notices, release artifact feature check).
+SUPPLY_FILES='rust/Cargo.lock','rust/Cargo.toml','rust/crates/**/Cargo.toml','rust/about.toml','rust/about.hbs','rust/crates/mkit-cli/**','rust/rust-toolchain.toml','scripts/check-release-artifact-features.sh','scripts/release/**','.github/workflows/release.yml','cloudbuild/supply.yaml'
+mk_pr   mkit-supply-pr   --build-config=cloudbuild/supply.yaml \
+        --comment-control="$COL" --included-files="$SUPPLY_FILES"
+mk_push mkit-supply-main --build-config=cloudbuild/supply.yaml \
+        --included-files="$SUPPLY_FILES"
+
+# Meta checks (spec status, crypto stack version, actionlint, dependabot
+# coverage, no-windows-target).
+META_FILES='docs/specs/**','.github/workflows/**','.github/actions/**','.github/actionlint.yaml','.github/dependabot.yml','scripts/check-spec-status.sh','scripts/check-crypto-stack-version.sh','scripts/check-dependabot-coverage.sh','scripts/check-no-windows-target.sh','justfile','install.sh','rust/**/Cargo.toml','rust/**/Cargo.lock','contrib/**/Cargo.toml','contrib/signers/**/Cargo.lock','apps/*/Cargo.toml','apps/**/Cargo.lock','apps/web/package.json','apps/web/scripts/*.mjs','apps/web/.gitignore','cloudbuild/meta.yaml'
+mk_pr   mkit-meta-pr   --build-config=cloudbuild/meta.yaml \
+        --comment-control="$COL" --included-files="$META_FILES"
+mk_push mkit-meta-main --build-config=cloudbuild/meta.yaml \
+        --included-files="$META_FILES"
+
+# TypeScript apps (web, mcp, og, spammer-worker, workers): one build runs all
+# five in parallel, so the trigger uses the union of the old path filters.
+TS_FILES='apps/**','docs/**','SKILL.md','README.md','man/**','rust/Cargo.lock','rust/Cargo.toml','rust/rust-toolchain.toml','rust/vendor/ruzstd/**','rust/crates/mkit-attest/**','rust/crates/mkit-core/**','rust/crates/mkit-rpc/**','rust/crates/mkit-wasm/**','rust/crates/mkit-repo-client/**','scripts/patch-wasm-bundler-glue.mjs','scripts/check-generated-fresh-ts.sh','cloudbuild/ts.yaml'
+mk_pr   mkit-ts-pr   --build-config=cloudbuild/ts.yaml \
+        --comment-control="$COL" --included-files="$TS_FILES"
+mk_push mkit-ts-main --build-config=cloudbuild/ts.yaml \
+        --included-files="$TS_FILES"
 
 # Coverage: informational, main pushes only (does not gate PRs).
 mk_push mkit-coverage-main --build-config=cloudbuild/coverage.yaml

@@ -1,0 +1,123 @@
+# Mutation testing on Cloud Build. Ports .github/workflows/mutants.yml.
+# cargo-mutants flips comparisons, swaps return values, and so on. It checks
+# that the test suite catches each change. A surviving mutant means no test
+# pins that code path.
+#
+# One config, two lanes. Pick the lane with _MODE:
+#   diff (default): `--in-diff` on the lines a PR changed in mkit-core,
+#     mkit-attest, and mkit-keystore. It is a no-op when the PR touches none
+#     of them. Bounded by the size of the diff.
+#   full: unscoped sweep of mkit-attest only. mkit-core has 4527 mutants and
+#     mkit-keystore has 870. Neither fits a full sweep. They stay covered by
+#     the diff lane.
+#
+# GitHub Actions uploaded the mutants.out report as an artifact. Here the
+# step prints the missed and timeout lists to the build log instead.
+#
+# Triggers:
+#   mkit-mutants-pr     PR to main, _MODE=diff. Cloud Build gives _BASE_BRANCH
+#                       and COMMIT_SHA on PR triggers.
+#   mkit-mutants-full   manual-event trigger, _MODE=full.
+#   Cloud Scheduler for mkit-mutants-full: '0 7 * * 2' UTC (Tuesday).
+#
+# Uses the nightly image: the cargo-mutants baked into mkit-ci needs a newer
+# glibc than that image has.
+#
+# Smoke runs (no trigger context):
+#   --substitutions=_MODE=diff,_BASE_SHA=<sha>,_HEAD_SHA=<sha>
+#   --substitutions=_MODE=full,_MUTANTS_EXTRA="--shard 1/100"
+
+substitutions:
+  _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache
+  _NIGHTLY_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci-nightly:rust-1.95.0
+  _MODE: diff
+  _REPO_URL: https://github.com/officialunofficial/mkit.git
+  # diff lane: PR base branch. Cloud Build sets it on PR triggers.
+  _BASE_BRANCH: main
+  # diff lane: exact SHAs. Empty means origin/_BASE_BRANCH and COMMIT_SHA.
+  _BASE_SHA: ""
+  _HEAD_SHA: ""
+  # Extra cargo-mutants flags, for example "--shard 1/100" for a smoke run.
+  _MUTANTS_EXTRA: ""
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 200
+  dynamicSubstitutions: true
+# Matches the old 300 min cap of the full sweep.
+timeout: 18000s
+
+steps:
+  - name: ${_NIGHTLY_IMAGE}
+    id: mutants
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=mutants"
+      - "MODE=${_MODE}"
+      - "REPO_URL=${_REPO_URL}"
+      - "BASE_BRANCH=${_BASE_BRANCH}"
+      - "BASE_SHA=${_BASE_SHA}"
+      - "HEAD_SHA=${_HEAD_SHA}"
+      - "BUILD_COMMIT=${COMMIT_SHA}"
+      - "MUTANTS_EXTRA=${_MUTANTS_EXTRA}"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        PACKAGES="-p mkit-core -p mkit-attest -p mkit-keystore"
+
+        src=$$(pwd)
+        if [ "$$MODE" = diff ]; then
+          # The diff needs history. A manual submit uploads no .git, so clone.
+          if [ ! -d .git ]; then
+            git clone "$$REPO_URL" /workspace/src
+            src=/workspace/src
+          fi
+          cd "$$src"
+          if [ "$$(git rev-parse --is-shallow-repository)" = true ]; then
+            git fetch --unshallow origin || git fetch origin
+          fi
+          git fetch origin "$$BASE_BRANCH"
+          head=$${HEAD_SHA:-$${BUILD_COMMIT:-HEAD}}
+          base=$${BASE_SHA:-$$(git merge-base "origin/$$BASE_BRANCH" "$$head")}
+          git checkout -q "$$head"
+          echo "diff range: $$base...$$head"
+          cd rust
+          # Triple-dot against the merge-base matches the PR "Files changed" tab.
+          # --relative strips the rust/ prefix so the paths match the workspace.
+          git diff --relative "$$base...$$head" \
+            -- crates/mkit-core crates/mkit-attest crates/mkit-keystore \
+            > /tmp/mutants.diff
+          lines=$$(wc -l < /tmp/mutants.diff)
+          echo "diff lines touching scoped crates: $$lines"
+          if [ "$$lines" -eq 0 ]; then
+            echo "no scoped changes, nothing to mutate"
+            exit 0
+          fi
+          # shellcheck disable=SC2086
+          cargo mutants --in-diff /tmp/mutants.diff $$PACKAGES \
+            --test-tool nextest --timeout-multiplier 3 $$MUTANTS_EXTRA \
+            -- --locked --all-features || rc=$$?
+        else
+          cd rust
+          # shellcheck disable=SC2086
+          cargo mutants -p mkit-attest \
+            --test-tool nextest --timeout-multiplier 3 $$MUTANTS_EXTRA \
+            -- --locked --all-features || rc=$$?
+        fi
+        rc=$${rc:-0}
+        # Replace the GitHub artifact upload: print the report to the log.
+        for f in missed timeout unviable; do
+          if [ -f mutants.out/$$f.txt ]; then
+            echo "=== mutants.out/$$f.txt"
+            head -200 "mutants.out/$$f.txt"
+          fi
+        done
+        sccache --show-stats || true
+        exit "$$rc"
