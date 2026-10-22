@@ -2,6 +2,6 @@
 # not a rust/ workspace member). Matches the workspace MSRV; declares the wasm
 # target so rustup installs it before the build. See apps/repo-worker for context.
 [toolchain]
-channel = "1.95.0"
+channel = "1.99.1"
 profile = "minimal"
 targets = ["wasm32-unknown-unknown"]

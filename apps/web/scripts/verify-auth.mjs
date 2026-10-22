@@ -17,7 +17,7 @@ if (positional.length > 1 || args.some((arg) => arg.startsWith('--') && arg !== 
 }
 
 const routes = [
-  ['/', 'Overview'], ['/create', 'Create'], ['/concepts', 'Concepts'],
+  ['/', 'Overview'], ['/concepts', 'Concepts'],
   ['/performance', 'Performance'], ['/parity', 'Parity'], ['/specs', 'Specs'], ['/multiplayer', 'Multiplayer'],
 ];
 const report = { passed: false, mockSession, checks: [], ceremonies: { created: 0, asserted: 0 } };

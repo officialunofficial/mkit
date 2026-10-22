@@ -59,7 +59,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_VERSION: "1.95.0"
+  RUST_VERSION: "1.99.1"
   # The crates the PR-diff lane runs against — security-critical
   # (object/commit model, signing/attestation, keystore). Bounded by
   # --in-diff regardless of each crate's total size (see the scoping note
@@ -91,7 +91,7 @@ jobs:
         run: cargo install cargo-mutants --locked
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283  # v2
         with:
           tool: cargo-nextest
 
@@ -152,7 +152,7 @@ jobs:
         run: cargo install cargo-mutants --locked
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283  # v2
         with:
           tool: cargo-nextest
 

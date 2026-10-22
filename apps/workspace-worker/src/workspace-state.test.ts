@@ -258,28 +258,6 @@ describe("WorkspaceState on transactional SQLite Durable Object storage", () => 
         });
     });
 
-    it("exposes public project state without owner conversation or running-task details", async () => {
-        const task = { id: "task", prompt: "Private prompt", status: "running", createdAt: 1 };
-        const message = {
-            id: "message",
-            role: "assistant",
-            text: "Private conversation",
-            createdAt: 1,
-        };
-        const { id } = await setup({ task, "message:0000000000001:message": message });
-        const publicView = (await (
-            await request(id, { op: "view", owner: false })
-        ).json()) as WorkspaceView;
-        expect(publicView).toMatchObject({ isOwner: false, messages: [], task: null });
-        expect(JSON.stringify(publicView)).not.toContain("Private");
-        const ownerView = (await (
-            await request(id, { op: "view", owner: true })
-        ).json()) as WorkspaceView;
-        expect(ownerView).toMatchObject({ isOwner: true, messages: [message], task });
-        expect(publicView.files).toEqual(ownerView.files);
-        expect(publicView.workspace).toEqual(ownerView.workspace);
-    });
-
     it("round-trips immutable manifests and signed versions while advancing the current head", async () => {
         const { id } = await setup();
         const initial = await request(id, {
@@ -343,18 +321,7 @@ describe("WorkspaceState on transactional SQLite Durable Object storage", () => 
         expect(await (await request(id, { op: "files" })).json()).toEqual(currentObjects.files);
     });
 
-    it("can apply and replay an ordinary mutation after a long owner conversation", async () => {
-        const messages = Object.fromEntries(
-            Array.from({ length: 60 }, (_, index) => [
-                `message:${String(index).padStart(13, "0")}:${index}`,
-                {
-                    id: String(index),
-                    role: "assistant",
-                    text: "漢".repeat(12_000),
-                    createdAt: index,
-                },
-            ]),
-        );
+    it("can apply and replay an ordinary mutation with a large owner view", async () => {
         const files = Object.fromEntries(
             Array.from({ length: 256 }, (_, index) => [
                 `${"a".repeat(240)}/${"b".repeat(240)}/${"c".repeat(240)}/${index}-${"d".repeat(230)}`,
@@ -374,7 +341,7 @@ describe("WorkspaceState on transactional SQLite Durable Object storage", () => 
                 },
             ]),
         );
-        const { id, meta } = await setup({ ...messages, ...history, files });
+        const { id, meta } = await setup({ ...history, files });
         const result = await request(id, {
             op: "apply",
             auth: auth("a"),
@@ -383,11 +350,10 @@ describe("WorkspaceState on transactional SQLite Durable Object storage", () => 
         if (result.status !== 200) throw new Error(await result.text());
         const body = (await result.json()) as WorkspaceView;
         expect(body.workspace.title).toBe("Still editable");
-        expect(body.messages).toHaveLength(60);
         expect(body.files).toHaveLength(256);
         expect(body.versions).toHaveLength(50);
         expect(new TextEncoder().encode(JSON.stringify(body)).length).toBeGreaterThan(
-            2 * 1024 * 1024,
+            256 * 1024,
         );
         const replay = await request(id, { op: "replay", auth: auth("a") });
         expect(replay.status).toBe(200);
@@ -406,36 +372,6 @@ describe("WorkspaceState on transactional SQLite Durable Object storage", () => 
         );
         expect(parts).toHaveLength(receipt.parts);
         for (const [, part] of parts) expect(String(part).length).toBeLessThanOrEqual(32 * 1024);
-    });
-
-    it("fails oversized replay responses atomically and leaves no partial receipt", async () => {
-        const messages = Object.fromEntries(
-            Array.from({ length: 60 }, (_, index) => [
-                `message:${String(index).padStart(13, "0")}:${index}`,
-                {
-                    id: String(index),
-                    role: "assistant",
-                    text: "x".repeat(40_000),
-                    createdAt: index,
-                },
-            ]),
-        );
-        const { id, meta } = await setup(messages);
-        const result = await request(id, {
-            op: "apply",
-            auth: auth("a"),
-            mutation: { writes: { meta: { ...meta, title: "Must roll back" } } },
-        });
-        expect(result.status).toBe(413);
-        const inspection = (await (await request(id, { op: "inspect" })).json()) as {
-            values: Record<string, unknown>;
-        };
-        expect(inspection.values.meta).toEqual(meta);
-        expect(
-            Object.keys(inspection.values).some(
-                (key) => key.startsWith("receipt:") || key.startsWith("receipt-part:"),
-            ),
-        ).toBe(false);
     });
 
     it("continues to replay inline receipts written before chunking was introduced", async () => {

@@ -1,6 +1,6 @@
 # rustfmt configuration for the mkit workspace.
 #
-# Stable-only options. The toolchain is pinned at 1.95 stable
+# Stable-only options. The toolchain is pinned at 1.99 stable
 # (`rust/rust-toolchain.toml`); nightly-only knobs are commented out
 # at the bottom and can be enabled in a single diff once they
 # stabilise.

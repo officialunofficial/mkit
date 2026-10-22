@@ -18,7 +18,7 @@ If sccache fails, use plain Cargo with `RUSTC_WRAPPER` unset.
 
 Cargo's [build directory setting](https://doc.rust-lang.org/cargo/reference/config.html#buildbuild-dir)
 is stable since [Cargo 1.91](https://blog.rust-lang.org/2025/10/30/Rust-1.91.0/).
-The pinned toolchain is 1.95, so no fallback is needed.
+The pinned toolchain is 1.99, so no fallback is needed.
 The recipe sets `CARGO_BUILD_BUILD_DIR` to
 `~/.cache/mkit/build/{workspace-path-hash}`. Cargo expands the placeholder
 from the workspace manifest path, giving each worktree its own intermediates.

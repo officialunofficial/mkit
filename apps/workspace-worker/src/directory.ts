@@ -1,4 +1,3 @@
-import { INPUT_TOKEN_RESERVE, refill, waitForCapacity, type ModelBucket } from "./model-budget";
 import { DurableObject } from "cloudflare:workers";
 import type { AuthenticatedOperation } from "./auth";
 import { type PreparedWorkspace, type RemixRequest, type WorkspaceSummary } from "./contracts";
@@ -13,9 +12,8 @@ type Preparation = {
     status: "pending" | "ready" | "failed";
     result?: PreparedWorkspace;
 };
-type Usage = { requests: number; tokens: number };
 
-/** Public discovery and account-wide admission; never stores owner conversations. */
+/** Public discovery and browser sessions; never stores owner conversations. */
 export class WorkspaceDirectory extends DurableObject<Env> {
     private browserSessions = new BrowserSessions(this.ctx.storage);
 
@@ -140,131 +138,5 @@ export class WorkspaceDirectory extends DurableObject<Env> {
             } satisfies Preparation);
             throw error;
         }
-    }
-
-    async admitTask(
-        owner: string,
-        operation: string,
-    ): Promise<{ error?: { status: number; message: string; retryAfter?: number } }> {
-        try {
-            await this.admitTaskInternal(owner, operation);
-            return {};
-        } catch (error) {
-            if (error instanceof HttpError)
-                return {
-                    error: {
-                        status: error.status,
-                        message: error.message,
-                        retryAfter: error.retryAfter,
-                    },
-                };
-            throw error;
-        }
-    }
-    private async admitTaskInternal(owner: string, operation: string): Promise<void> {
-        await this.ctx.storage.transaction(async (storage) => {
-            const key = `task:${owner}:${operation}`;
-            if (await storage.get(key)) return;
-            const dayKey = `tasks:${Math.floor(Date.now() / 86400000)}:${owner}`;
-            const count = (await storage.get<number>(dayKey)) ?? 0;
-            if (count >= 12)
-                throw new HttpError(
-                    429,
-                    "Today’s agent allowance is used up. Your files are still available.",
-                    3600,
-                );
-            await storage.put({ [dayKey]: count + 1, [key]: true });
-        });
-    }
-
-    async reserveModel(
-        id: string,
-        inputTokens: number,
-        maxOutputTokens: number,
-    ): Promise<{ retryAfter: number; error?: { status: number; message: string } }> {
-        try {
-            return await this.reserveModelInternal(id, inputTokens, maxOutputTokens);
-        } catch (error) {
-            if (error instanceof HttpError)
-                return {
-                    retryAfter: error.retryAfter ?? 0,
-                    error: { status: error.status, message: error.message },
-                };
-            throw error;
-        }
-    }
-    private async reserveModelInternal(
-        id: string,
-        inputTokens: number,
-        maxOutputTokens: number,
-    ): Promise<{ retryAfter: number }> {
-        if (
-            !Number.isSafeInteger(inputTokens) ||
-            inputTokens < 0 ||
-            !Number.isSafeInteger(maxOutputTokens) ||
-            maxOutputTokens < 1
-        )
-            throw new HttpError(400, "Invalid model budget.");
-        const reserved = inputTokens + maxOutputTokens + INPUT_TOKEN_RESERVE;
-        if (reserved > 7500)
-            throw new HttpError(
-                429,
-                "This conversation is too large for the free model allowance. Select New conversation to continue.",
-                60,
-            );
-        return this.ctx.storage.transaction(async (storage) => {
-            const now = Date.now(),
-                day = Math.floor(now / 86400000);
-            const dayKey = `models:${day}`,
-                minuteKey = "modelBucket";
-            const usage = (await storage.get<Usage>(dayKey)) ?? { requests: 0, tokens: 0 };
-            const minuteUsage = refill(await storage.get<ModelBucket>(minuteKey), now);
-            const maxRequests = Number(this.env.MAX_DAILY_MODEL_REQUESTS),
-                maxTokens = Number(this.env.MAX_DAILY_MODEL_TOKENS);
-            if (usage.requests >= maxRequests || usage.tokens + reserved > maxTokens)
-                throw new HttpError(
-                    429,
-                    "The shared daily model allowance is used up. Your work is saved; try again tomorrow.",
-                    3600,
-                );
-            const retryAfter = waitForCapacity(minuteUsage, reserved);
-            if (retryAfter > 0) return { retryAfter };
-            await storage.put({
-                [dayKey]: { requests: usage.requests + 1, tokens: usage.tokens + reserved },
-                [minuteKey]: {
-                    ...minuteUsage,
-                    requests: minuteUsage.requests + 1,
-                    tokens: minuteUsage.tokens + reserved,
-                },
-                [`reservation:${id}`]: { dayKey, minuteKey, reserved },
-            });
-            return { retryAfter: 0 };
-        });
-    }
-
-    async settleModel(id: string, actualTokens: number): Promise<void> {
-        if (!Number.isSafeInteger(actualTokens) || actualTokens < 0) return;
-        await this.ctx.storage.transaction(async (storage) => {
-            const key = `reservation:${id}`;
-            const reservation = await storage.get<{
-                dayKey: string;
-                minuteKey: string;
-                reserved: number;
-            }>(key);
-            if (!reservation) return;
-            for (const usageKey of [reservation.dayKey, reservation.minuteKey]) {
-                const stored = await storage.get<Usage & { at?: number }>(usageKey);
-                const usage =
-                    usageKey === "modelBucket" && stored
-                        ? refill(stored as ModelBucket, Date.now())
-                        : stored;
-                if (usage)
-                    await storage.put(usageKey, {
-                        ...usage,
-                        tokens: Math.max(0, usage.tokens - reservation.reserved + actualTokens),
-                    });
-            }
-            await storage.delete(key);
-        });
     }
 }

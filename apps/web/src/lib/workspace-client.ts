@@ -1,14 +1,7 @@
-import {
-  WORKSPACE_API,
-  grantMessage,
-  type PreparedWorkspace,
-  type RemixRequest,
-  type WorkspaceView,
-} from '../../../workspace-worker/src/contracts'
-import { useIdentityStore, type IdentityState } from './identity-store'
+import { WORKSPACE_API } from '../../../workspace-worker/src/contracts'
+import type { IdentityState } from './identity-store'
 import type { MkitApi } from './mkit'
 import { buildSignedEnvelope, envelopeHeaders } from './repo/envelope'
-import { bytesToHex, hexToBytes } from '../components/use-mkit'
 export { WORKSPACE_API }
 export type * from '../../../workspace-worker/src/contracts'
 
@@ -54,29 +47,4 @@ export async function workspaceWrite<T>(
     headers: { 'Content-Type': 'application/json', ...envelopeHeaders(envelope) },
   })
   return readResponse<T>(response)
-}
-
-export async function remixWorkspace(
-  api: MkitApi,
-  identity: IdentityState,
-  source: RemixRequest,
-): Promise<WorkspaceView> {
-  const prepared = await workspaceWrite<PreparedWorkspace>(api, identity, 'workspaces', '/prepare', source)
-  // Preparation is asynchronous. Do not retain signing authority after the user locks or switches identity.
-  const currentIdentity = useIdentityStore.getState()
-  if (!hasWorkspaceIdentity(currentIdentity) || currentIdentity.seedHex !== identity.seedHex)
-    throw new Error('Identity changed. Unlock your passkey and remix again.')
-  if (!hasWorkspaceIdentity(identity) || !identity.seedHex) throw new Error('Unlock your passkey identity.')
-  if (prepared.grant.ownerPublicKey !== identity.ed25519PubkeyHex || prepared.grant.workspaceId !== prepared.id)
-    throw new Error('Workspace identity did not match. Please try again.')
-  const signature = bytesToHex(
-    api.ed25519_sign(
-      hexToBytes(api.blake3_hex(new TextEncoder().encode(grantMessage(prepared.grant)))),
-      hexToBytes(identity.seedHex),
-    ),
-  )
-  return workspaceWrite(api, currentIdentity, prepared.id, `/${prepared.id}/activate`, {
-    grant: prepared.grant,
-    signature,
-  })
 }

@@ -267,7 +267,7 @@ fn decode_b64url(s: &str) -> Result<[u8; PUBKEY_LEN], TransportError> {
     buf[43] = b'A'; // pad to 44 chars (= a multiple of 4) with the zero-bit char.
     let mut out = [0u8; PUBKEY_LEN];
     let mut out_pos = 0usize;
-    for chunk in buf.chunks_exact(4) {
+    for chunk in buf.as_chunks::<4>().0 {
         let v0 = b64url_nibble(chunk[0])?;
         let v1 = b64url_nibble(chunk[1])?;
         let v2 = b64url_nibble(chunk[2])?;

@@ -54,7 +54,7 @@ export default {
                 );
             }
             const match =
-                /^\/api\/workspaces\/([0-9a-f]{32})(?:\/(file|session|activate|tasks|cancel|revoke|restore|versions|terminal|conversation))?$/.exec(
+                /^\/api\/workspaces\/([0-9a-f]{32})(?:\/(file|session|activate|revoke|restore|versions|terminal))?$/.exec(
                     path,
                 );
             if (!match) throw new HttpError(404, "Workspace route not found.");

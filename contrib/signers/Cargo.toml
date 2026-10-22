@@ -24,7 +24,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.99.1"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/officialunofficial/mkit"
 authors = ["Official Unofficial, Inc."]
@@ -41,6 +41,10 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 doc_lazy_continuation = "allow"
 module_inception = "allow"
+# Mirrors rust/Cargo.toml: these three pedantic lints are allowed there too.
+assert_is_empty = "allow"
+unused_async_trait_impl = "allow"
+chunks_exact_to_as_chunks = "allow"
 multiple_crate_versions = "allow"
 # Mirror the main workspace: production code must surface errors instead of
 # panicking. Tests are exempt via `allow-unwrap-in-tests` in the repo-root

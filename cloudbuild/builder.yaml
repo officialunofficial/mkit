@@ -2,10 +2,10 @@
 # Run once during setup, and again whenever Dockerfile.ci or rust-toolchain.toml
 # changes. The ci/codegen/security/docs/geiger/coverage configs consume it via
 # their _CI_IMAGE substitution (keep the default in lockstep with _CI_IMAGE here
-# and the :rust-1.95.0 tag).
+# and the :rust-1.99.1 tag).
 
 substitutions:
-  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.99.1
 
 steps:
   - name: gcr.io/cloud-builders/docker

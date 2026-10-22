@@ -580,7 +580,7 @@ fn a_stale_applied_packs_record_self_heals_with_a_visible_event() {
 fn the_source_trait_is_object_safe() {
     let remote = Remote::new();
     let source: &dyn RemoteSource = &remote.source();
-    assert!(source.list_branches().unwrap().is_empty());
+    assert_eq!(source.list_branches().unwrap(), [] as [mkit_core::Ref; 0]);
 }
 
 #[test]

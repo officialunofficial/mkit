@@ -34,7 +34,7 @@ impl EncodedBudget {
 
     pub(crate) fn charge(&self, bytes: u64) -> Result<(), StoreError> {
         self.used
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
                 used.checked_add(bytes).filter(|total| *total <= self.limit)
             })
             .map(|_| ())

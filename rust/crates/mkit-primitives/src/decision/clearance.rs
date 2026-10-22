@@ -572,6 +572,7 @@ pub struct CombinedAcceptance {
 impl CombinedAcceptance {
     /// The acceptance decision, unchanged. It alone owns ticket consumption, the
     /// terminal result, and reservation settlement.
+    #[must_use]
     pub const fn acceptance(&self) -> &Guarded<WriteDecision> {
         &self.acceptance
     }

@@ -26,7 +26,7 @@ Linux release archives require **glibc 2.39 or newer**; see [Linux requirements 
 Other options:
 
 ```sh
-cargo install mkit-cli                        # crates.io (Rust 1.95+)
+cargo install mkit-cli                        # crates.io (Rust 1.99+)
 bun add @officialunofficial/mkit-wasm         # WASM, or: npm i @officialunofficial/mkit-wasm
 ```
 
@@ -109,7 +109,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-The MSRV is Rust 1.95.0, pinned in [`rust/rust-toolchain.toml`](rust/rust-toolchain.toml).
+The MSRV is Rust 1.99.1, pinned in [`rust/rust-toolchain.toml`](rust/rust-toolchain.toml).
 
 Issues and PRs are welcome. [`CONTRIBUTING.md`](CONTRIBUTING.md) covers build, test, and style expectations. Inbound contributions use the project license, with no DCO or CLA. Follow [`docs/STYLE-GUIDE.md`](docs/STYLE-GUIDE.md) for docs and commit messages.
 

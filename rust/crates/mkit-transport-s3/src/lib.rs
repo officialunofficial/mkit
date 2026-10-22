@@ -1502,7 +1502,10 @@ mod tests {
 
     #[test]
     fn list_xml_empty() {
-        assert!(extract_keys("<ListBucketResult></ListBucketResult>").is_empty());
+        assert_eq!(
+            extract_keys("<ListBucketResult></ListBucketResult>"),
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]

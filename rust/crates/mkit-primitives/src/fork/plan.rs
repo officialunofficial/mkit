@@ -281,7 +281,7 @@ impl Work {
 }
 fn find(packs: &[ForkInventory], id: &Hash, work: &mut Work) -> Result<usize, Failure> {
     // Charge the worst-case comparisons before the search.
-    work.charge(u64::from(usize::BITS - packs.len().leading_zeros()) + 1)?;
+    work.charge(u64::from(packs.len().bit_width()) + 1)?;
     packs
         .binary_search_by_key(id, |pack| pack.pack)
         .map_err(|_| invalid())

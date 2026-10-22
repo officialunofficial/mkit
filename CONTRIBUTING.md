@@ -31,7 +31,7 @@ Advisories. Full policy: [SECURITY.md](SECURITY.md).
 
 ## Development setup
 
-Requires **Rust 1.95** (auto-installed by rustup from
+Requires **Rust 1.99** (auto-installed by rustup from
 `rust/rust-toolchain.toml`).
 
 ```sh

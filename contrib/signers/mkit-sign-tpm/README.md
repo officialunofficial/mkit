@@ -31,7 +31,7 @@ Headline properties:
   - **Debian/Ubuntu**: `sudo apt install libtss2-dev`
   - **Fedora/RHEL**: `sudo dnf install tpm2-tss-devel`
   - **Arch**: `sudo pacman -S tpm2-tss`
-- Rust 1.95+ (inherits the workspace `rust-toolchain`).
+- Rust 1.99+ (inherits the workspace `rust-toolchain`).
 
 ### Windows
 
