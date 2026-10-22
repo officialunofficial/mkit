@@ -33,6 +33,10 @@ pub struct VerifyLimits {
 impl VerifyLimits {
     /// Finite indexed execution profile. These are execution budgets, not wire caps.
     ///
+    /// Sized to accept about 100,000 raw 4 KiB entries; the crate README's
+    /// verify-work sizing section gives the measured per-entry charges and the
+    /// override formula.
+    ///
     /// ```
     /// let limits = mkit_primitives::limits::VerifyLimits::indexed();
     /// assert_eq!(limits.acquisition_bytes, 1_048_576);
@@ -50,7 +54,7 @@ impl VerifyLimits {
             decoded_bytes: 4 << 30,
             dependency_edges: 10_000_000,
             external_lookups: 10_000_000,
-            work: 1_000_000_000,
+            work: 16 << 30,
         }
     }
 }

@@ -126,6 +126,60 @@ envelope. A new generation rejects old completions but does not free memory
 still owned by your old workers. Resume uses the same checkpoint format and
 starts serially; opt in again after `VerifyDriver::resume` if desired.
 
+## Size the verify work budget
+
+Every `VerifyLimits` field is an execution budget, not a wire cap: exhaustion
+is a caller-resource refusal, never a content verdict. All fields are public,
+so hosts may override any of them; `VerifyLimits::indexed()` ships a default
+sized for large packs of small files.
+
+The cumulative `work` counter charges exact operations: each acquired source
+byte three times for hashing, each canonical object once for decode and
+signature inspection, evidence pages at their encoded length for decode,
+authentication, and encode passes, plus small fixed charges per index event.
+On a serial run over raw 4 KiB blobs filed under leaf trees with three signed
+commits, the charged work measures:
+
+| entries | total work | work per entry |
+|--------:|-----------:|---------------:|
+| 1,004 | 70.7 M | 70,414 |
+| 10,014 | 899.4 M | 89,810 |
+| 30,034 | 2,983.0 M | 99,322 |
+| 100,104 | 10,847.4 M | 108,361 |
+
+Entries include the trees and commits. The per-entry charge grows slowly
+with the evidence indexes — about +19,000 units per tenfold entry count — not
+quadratically. A delta-heavy pack (depth-50 chains of 4 KiB results) measured
+86,048 units per entry, including the canonical base each link refetches.
+Larger entries scale the byte charges: per-entry work is about `4 × wire
+entry bytes` plus the table's evidence term at that pack size.
+
+To size `work` for a target pack, multiply the per-entry charge nearest your
+entry count and entry size, then add headroom for the growth term:
+
+```text
+work ≈ entries × units-per-entry × 1.25
+```
+
+The indexed default, `work: 16 << 30`, admits 100,000 raw 4 KiB entries with
+about 58% headroom at the measured charge. Override it like any field:
+
+```rust
+let limits = mkit_primitives::limits::VerifyLimits {
+    work: 64 << 30,
+    ..mkit_primitives::limits::VerifyLimits::indexed()
+};
+assert_eq!(limits.acquisition_bytes, 1 << 20);
+```
+
+The next budgets to bind are `decoded_bytes` — cumulative canonical bytes,
+about 4,150 per 4 KiB blob entry, so roughly a million small entries at the
+4 GiB default — and `dependency_edges` at 10 million. `evidence_pages` and
+`evidence_bytes` cap the pages a host holds at once; the 100,104-entry run
+retained about 41,000 pages and 70 MB, far under their defaults. Content
+ceilings stay on `IndexedProfile`; raising `pack_bytes` or `decoded_bytes`
+there is a profile change, not a budget tune.
+
 ## Decode bounded evidence
 
 `encode_leaf` and `encode_internal` construct canonical pages; `BranchChild`
