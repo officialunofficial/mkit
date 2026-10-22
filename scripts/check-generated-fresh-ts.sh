@@ -9,8 +9,8 @@
 # because it runs on a DIFFERENT CI surface: `check-generated-fresh.sh` runs
 # on Google Cloud Build's Rust-only `mkit-ci` image (cloudbuild/Dockerfile.ci
 # has no Node/bun/buf), while this needs `buf` + apps/web's `bun install`'d
-# `protoc-gen-es`. Wired into `.github/workflows/web.yml`'s `web` job, which
-# already installs Node/Bun/protoc and runs on every PR touching apps/web.
+# `protoc-gen-es`. Wired into `cloudbuild/ts.yaml`'s `web` step, which runs
+# on the baked image (Node, Bun, protoc, buf) for every PR touching apps/web.
 #
 # Requires: `buf` on PATH, apps/web/node_modules populated (`bun install`).
 

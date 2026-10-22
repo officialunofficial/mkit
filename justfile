@@ -1,6 +1,6 @@
 # Local CI parity. Each `ci-*` recipe is a literal extraction of commands
 # already run by cloudbuild/ci.yaml / cloudbuild/security.yaml /
-# cloudbuild/docs.yaml / cloudbuild/geiger.yaml / .github/workflows/rust.yml /
+# cloudbuild/docs.yaml / cloudbuild/geiger.yaml / cloudbuild/server.yaml /
 # .github/workflows/buf.yml
 # — no new logic lives here, so keep this file in sync with those when they
 # change instead of letting it drift into a second source of truth.
@@ -82,7 +82,7 @@ ci-linux:
     # check. Locally this just checks against whatever toolchain is active.
     ( cd rust && cargo check --workspace --locked --all-targets )
 
-# Mirrors .github/workflows/rust.yml's `build-and-test` job (macOS leg).
+# Mirrors .github/workflows/native.yml's `build-and-test` job (macOS leg).
 ci-macos:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -242,8 +242,8 @@ _version-contract:
 
 # ---------------------------------------------------------------------------
 # Formal verification (docs/FORMAL.md, epic MKIT-17). Unlike the ci-*
-# recipes above, these are the source: .github/workflows/formal.yml (nightly
-# + workflow_dispatch) calls them, so change them here, not there. Every
+# recipes above, these are the source: cloudbuild/nightly-formal.yaml (Cloud
+# Scheduler, nightly) calls them, so change them here, not there. Every
 # script prints one "<check> <expected outcome>" line per check and exits 1
 # on any unexpected outcome (a holding invariant that should be violated
 # counts, so a vacuous property fails the run).

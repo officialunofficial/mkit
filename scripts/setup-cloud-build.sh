@@ -11,10 +11,10 @@
 #   3. Codecov token         (optional — Secret Manager, for coverage upload)
 #   4. Build triggers        (the /gcbrun-gated Rust suite + path-gated gates)
 #
-# SCOPE: CI only. mkit ships a CLI binary + Cloudflare Workers, so there is no
-# image-publish / GKE-deploy half. Release/crates.io/npm/
-# cosign stay on GitHub Actions; the macOS + keystore-backends legs (which Cloud
-# Build's Linux containers can't run) also stay on GitHub Actions.
+# SCOPE: CI, scheduled jobs and tag-driven crate publishing. mkit has no GKE
+# deploy half. The GitHub binaries, cosign, SLSA, npm Trusted Publishing and
+# release-plz stay on GitHub Actions, as do the macOS legs (native.yml) that
+# Cloud Build's Linux containers can't run.
 #
 # Idempotent: existing buckets/secrets/triggers are detected and skipped, so it
 # is safe to re-run. Requires gcloud (authed). Run from the repo root.
@@ -176,6 +176,60 @@ mk_push mkit-ts-main --build-config=cloudbuild/ts.yaml \
 
 # Coverage: informational, main pushes only (does not gate PRs).
 mk_push mkit-coverage-main --build-config=cloudbuild/coverage.yaml
+
+# ── 5. Release triggers (opt in: ENABLE_RELEASE_TRIGGERS=1) ──────────────────
+# Tag-driven crate, primitives and MCP publishes. These run the SAME release
+# steps as the GitHub publish workflows, so enable them only when the matching
+# GitHub workflow (crates-publish.yml, primitives-publish.yml, mcp-release.yml)
+# is retired in the same change. Otherwise one tag publishes twice.
+# Needs secrets CARGO_REGISTRY_TOKEN's source (CRATES_PACKAGE_KEY),
+# cloudflare-api-token and BUF_TOKEN in Secret Manager (see docs/RELEASE.md).
+mk_tag() { local n="$1"; shift; mk "$n" "$@"; }
+if [ "${ENABLE_RELEASE_TRIGGERS:-0}" = "1" ]; then
+  echo "== release triggers =="
+  mk_tag mkit-publish-crates --tag-pattern='^v[0-9]+\.[0-9]+\.[0-9]+$' \
+         --build-config=cloudbuild/publish-crates.yaml
+  mk_tag mkit-mcp-release --tag-pattern='^v[0-9]+\.[0-9]+\.[0-9]+$' \
+         --build-config=cloudbuild/mcp-release.yaml \
+         --substitutions="_CF_ACCOUNT_ID=${CF_ACCOUNT_ID:?set CF_ACCOUNT_ID}"
+  mk_tag mkit-publish-primitives \
+         --tag-pattern='^mkit-primitives-v[0-9]+\.[0-9]+\.[0-9]+$' \
+         --build-config=cloudbuild/publish-primitives.yaml \
+         --substitutions="_GPG_FINGERPRINTS=${GPG_FINGERPRINTS:?set GPG_FINGERPRINTS}"
+fi
+
+# ── 6. Scheduled triggers (opt in: ENABLE_SCHEDULED_TRIGGERS=1) ──────────────
+# A manual trigger per config plus a Cloud Scheduler job that runs it
+# (polychrome's pattern). Cron times match the retired GitHub schedules (UTC).
+mk_manual() {
+  local n="$1" cfg="$2" cron="$3"; shift 3
+  mk "$n" --branch-pattern='^main$' --build-config="$cfg" "$@"
+  if gcloud scheduler jobs describe "$n" --project="$PROJECT" --location="$REGION" \
+       >/dev/null 2>&1; then
+    echo "  (scheduler job ${n} exists — skipping)"
+    return 0
+  fi
+  gcloud scheduler jobs create http "$n" --project="$PROJECT" --location="$REGION" \
+    --schedule="$cron" --time-zone=UTC --http-method=POST \
+    --uri="https://cloudbuild.googleapis.com/v1/projects/${PROJECT}/locations/${REGION}/triggers/${n}:run" \
+    --message-body='{"source":{"branchName":"main"}}' \
+    --oauth-service-account-email="$BUILD_SA"
+}
+if [ "${ENABLE_SCHEDULED_TRIGGERS:-0}" = "1" ]; then
+  echo "== scheduled triggers =="
+  mk_manual mkit-nightly-fuzz   cloudbuild/nightly-fuzz.yaml   '0 4 * * *'
+  mk_manual mkit-nightly-formal cloudbuild/nightly-formal.yaml '0 5 * * *'
+  mk_manual mkit-nightly-bench  cloudbuild/nightly-bench.yaml  '0 7 * * 0'
+  mk_manual mkit-mutants-full   cloudbuild/mutants.yaml        '0 7 * * 2' \
+            --substitutions=_MODE=full
+  mk_manual mkit-security-weekly cloudbuild/security.yaml      '0 6 * * 1'
+  mk_manual mkit-commonware-latest cloudbuild/commonware-latest.yaml '23 5 * * 1'
+  mk_manual mkit-connect-latest cloudbuild/connect-latest.yaml '23 5 * * 1'
+fi
+# Pull-request mutation diff.
+mk_pr mkit-mutants-pr --build-config=cloudbuild/mutants.yaml \
+      --comment-control="$COL" --included-files='rust/**' \
+      --substitutions=_MODE=diff
 
 echo "Done. Triggers:"
 gcloud builds triggers list --project="$PROJECT" --region="$REGION" \

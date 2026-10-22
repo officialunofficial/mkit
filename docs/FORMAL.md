@@ -261,8 +261,8 @@ These findings and exclusions remain open within the stated model bounds.
 ## Run the checks
 
 The `just` recipes run every layer and are what
-[`.github/workflows/formal.yml`](../.github/workflows/formal.yml) runs
-nightly (and on `workflow_dispatch`). Each prints one line per check and
+[`cloudbuild/nightly-formal.yaml`](../cloudbuild/nightly-formal.yaml) runs
+nightly on Cloud Build. Each prints one line per check and
 fails on any unexpected outcome. Times below are from a shared 15-core
 arm64 Mac. `just formal` is the smallest useful set, but at about an
 hour it runs nightly rather than on every PR; most of it is the `quint

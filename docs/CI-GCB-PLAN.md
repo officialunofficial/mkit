@@ -147,6 +147,14 @@ only after each new config passes a real pull request. Otherwise `main`
 loses a gate in the gap. Use `/mkit-ci-preflight` before every merge. It
 lists the GCB `mkit-*-pr` checks by name.
 
+## 5.4 Status
+
+Ported and proven with Cloud Build runs: `darwin`, `server`, `supply`,
+`meta`, `ts`, `mutants`, the nightly configs, and the publish configs (dry
+run). The matching GitHub workflows are deleted. `crates-publish.yml`,
+`primitives-publish.yml` and `mcp-release.yml` stay until the release
+triggers are enabled and one real tag has published on Cloud Build.
+
 ## 6. Order of work
 
 Each step is one pull request. Verify each with a real run before the next.

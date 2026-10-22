@@ -49,6 +49,14 @@ layout.
 | `connect-latest.yaml` | GitHub latest-patch Connect stack probe reproduction | Same bounded update/build/test script, including both client wasm builds; automatic runs use the scheduled and manifest/lockfile PR workflow. |
 | `commonware-latest.yaml` | GitHub latest-release probe reproduction | Same bounded update/build/test script; automatic runs use the scheduled and path-filtered GitHub workflow to avoid duplicate PR builds. |
 | `darwin.yaml` | new (no GitHub equivalent) | `cargo check` for `aarch64-apple-darwin` and `x86_64-apple-darwin` on Linux. `scripts/zig-cc-darwin.sh` lets `zig cc` compile the C build scripts (blake3, zstd-sys). It does not link or run tests. |
+| `server.yaml` | retired `rust.yml` server jobs and `conformance.yml` | Ten parallel shards: primitives, server clippy powerset (four crates), native wire conformance, patch semver, client wasm, sync native deps, protocol conformance. |
+| `supply.yaml` | retired `third-party-notices.yml`, `release-artifact-check.yml` | Notices drift and release artifact feature check. |
+| `meta.yaml` | retired `docs-lint.yml`, `crypto-stack-version.yml`, `actionlint.yml` | Spec status, crypto stack version, actionlint, dependabot coverage, no-windows-target. |
+| `ts.yaml` | retired `web.yml`, `mcp.yml`, `og.yml`, `spammer-worker.yml`, `workers.yml` | One build, five parallel steps. A `snapshot` step isolates `apps/web/vendor`. |
+| `mutants.yaml` | retired `mutants.yml` | `_MODE=diff` on pull requests, `_MODE=full` weekly. |
+| `nightly-fuzz.yaml`, `nightly-formal.yaml`, `nightly-bench.yaml` | retired `fuzz.yml`, `formal.yml`, `bench-freshness.yml` | Run on `mkit-ci-nightly` (`Dockerfile.nightly`, `builder-nightly.yaml`). Cloud Scheduler starts them. |
+| `publish-crates.yaml` | `crates-publish.yml` (retire at cutover) | Tag `vX.Y.Z`. Publishes crates and the Buf modules. `_DRY_RUN=true` proves it without publishing. |
+| `publish-primitives.yaml`, `mcp-release.yaml` | `primitives-publish.yml`, `mcp-release.yml` (retire at cutover) | Tag-driven. Same `_DRY_RUN` switch. |
 | `coverage.yaml` | retired from GitHub Actions, Cloud Build only | llvm-cov → lcov → Codecov (main only, non-fatal). |
 
 ## Triggers
@@ -220,3 +228,30 @@ same script with sccache:
 ```sh
 gcloud builds submit . --region=us-east4 --config=cloudbuild/connect-latest.yaml
 ```
+
+## Release publishing
+
+`setup-cloud-build.sh` creates the tag triggers only when
+`ENABLE_RELEASE_TRIGGERS=1`. Enable them in the same change that deletes
+`crates-publish.yml`, `primitives-publish.yml` and `mcp-release.yml`. Two
+live pipelines on one tag publish twice.
+
+Secrets in Secret Manager: `CRATES_PACKAGE_KEY` (crates.io token),
+`cloudflare-api-token`, and `BUF_TOKEN`. Grant the Cloud Build service account
+`roles/secretmanager.secretAccessor` on each.
+
+The crates.io token is long-lived. GitHub release builds use Trusted Publishing
+instead. Protect the `v*` and `mkit-primitives-v*` tags on GitHub, because
+anyone who can push one starts a publish build. Cloud Build has no concurrency
+group, so never start a manual run during a tag build. After a partial publish,
+re-run with `_EXCLUDE=crate1,crate2`.
+
+These stay on GitHub Actions: `release.yml` (macOS binaries, cosign, SLSA),
+the npm wasm publish, `release-plz.yml`, `release-verify.yml`, and
+`native.yml`.
+
+## Scheduled builds
+
+`ENABLE_SCHEDULED_TRIGGERS=1` creates a manual trigger and a Cloud Scheduler
+job for each nightly, weekly and mutation-sweep config. The cron times match the
+retired GitHub schedules.

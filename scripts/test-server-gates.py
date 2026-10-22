@@ -226,19 +226,20 @@ class ServerGates(unittest.TestCase):
                 self.assertNotIn("allowExitCodes", step)
 
     def test_native_wire_executor_and_gate(self):
-        yaml = (ROOT / ".github/workflows/rust.yml").read_text()
-        native = section(yaml, "native-wire-conformance:")
-        self.assertIn("runs-on: ubuntu-latest", native)
-        self.assertNotIn("if:", native)
-        self.assertNotIn("continue-on-error", native)
+        yaml = (ROOT / "cloudbuild/server.yaml").read_text()
+        lines = yaml.splitlines()
+        start = next(i for i, line in enumerate(lines)
+                     if line.strip() == "id: native-wire-conformance")
+        end = next((i for i in range(start + 1, len(lines))
+                    if lines[i].startswith("  - name:")), len(lines))
+        native = "\n".join(line for line in lines[start:end]
+                           if not line.lstrip().startswith("#"))
+        self.assertNotIn("allowFailure", native)
+        self.assertNotIn("allowExitCodes", native)
         self.assertIn("--features test-host --lib --test test_host --test test_host_migrations --test test_host_regressions -j 3 --success-output immediate --failure-output immediate --no-fail-fast", native)
         self.assertIn("python3 scripts/check-launch-feature-graph.py", native)
         self.assertIn("bash scripts/wasm-ruzstd-check.sh", native)
         self.assertIn("python3 scripts/test-server-gates.py --hosted-only", native)
-        gate = section(yaml, "ci-gate:")
-        self.assertIn("native-wire-conformance]", gate)
-        self.assertIn("needs.native-wire-conformance.result", gate)
-        self.assertIn('"${NATIVE_WIRE}"', gate)
 
 
 if __name__ == "__main__":
