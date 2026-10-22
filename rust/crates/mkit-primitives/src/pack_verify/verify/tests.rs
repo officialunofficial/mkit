@@ -5,6 +5,7 @@ mod checkpoints;
 mod compute;
 mod onepass;
 mod pages;
+mod work_budget;
 use crate::evidence::{MemberFact, Revision, SourceBinding};
 use mkit_core::{
     delta,

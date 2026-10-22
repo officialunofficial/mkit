@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `mkit-primitives` raises the `VerifyLimits::indexed()` default `work` budget
+  from 1,000,000,000 to `16 << 30` (17,179,869,184). The all-entry driver
+  charges about 70,000–108,000 work units per raw 4 KiB blob entry, growing
+  slowly with index size, so the previous default refused ordinary packs of
+  more than about 11,000 small entries while every other budget had headroom.
+  Charging rules, refusal codes, refusal order, evidence formats and
+  `IndexedProfile` content ceilings are unchanged. Migration: hosts that need
+  the previous ceiling set `VerifyLimits::work` explicitly; checkpoints taken
+  under the old default are not resumable under the new one. No wire or
+  stored-format change and no store reset.
+
 - Run the seven Tier-2 acceptance, recovery, replay and authority-guard
   conformance cases on verifying hosts. Their shared fixture now publishes a
   real commit pack and packmap node through signed, ticketed `UploadPack` and

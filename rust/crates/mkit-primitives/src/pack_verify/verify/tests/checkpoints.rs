@@ -5,6 +5,12 @@ use mkit_core::pack::window::WindowCursor;
 
 #[test]
 fn canonical_verify_checkpoint_fixture() {
+    // The frozen fixture embeds the limits it was encoded under; keep the
+    // original `work` ceiling so a default-profile change cannot churn it.
+    let limits = VerifyLimits {
+        work: 1_000_000_000,
+        ..limits()
+    };
     let mut writer = PackWriter::new();
     for data in [b"alpha".as_slice(), b"beta".as_slice()] {
         let (id, bytes) = blob(data);
@@ -12,7 +18,7 @@ fn canonical_verify_checkpoint_fixture() {
     }
     let pack = writer.finish().unwrap();
     let mut host = Host::new(&pack);
-    let mut machine = driver(&pack);
+    let mut machine = VerifyDriver::new(source(&pack), REPOSITORY, profile(), limits, 17).unwrap();
     let snapshot = loop {
         match machine.step().unwrap() {
             Step::Request(request) => host.serve(&mut machine, &request).unwrap(),
@@ -33,10 +39,10 @@ fn canonical_verify_checkpoint_fixture() {
         if machine.ordinal == 1
             && let Ok(snapshot) = machine.checkpoint()
         {
-            break Checkpoint::from_bytes(snapshot.bytes(), limits()).unwrap();
+            break Checkpoint::from_bytes(snapshot.bytes(), limits).unwrap();
         }
     };
-    let mut state = snapshot.decode(limits()).unwrap();
+    let mut state = snapshot.decode(limits).unwrap();
     // Portable cumulative history is independent of pointer width, allocator,
     // and incidental checkpoint attempts made by this fixture generator.
     state.meta.usage.peak_resident_bytes = 50_000_000;
@@ -48,7 +54,7 @@ fn canonical_verify_checkpoint_fixture() {
             cursor: &state.cursor,
             verify: state.verify,
         },
-        limits(),
+        limits,
     )
     .unwrap();
     assert_eq!(state.meta.ordinal, 1);
@@ -65,15 +71,8 @@ fn canonical_verify_checkpoint_fixture() {
             include_bytes!("../../../../fixtures/evidence/checkpoint-verify.bin")
         );
     }
-    let mut resumed = VerifyDriver::resume(
-        source(&pack),
-        REPOSITORY,
-        profile(),
-        limits(),
-        18,
-        &snapshot,
-    )
-    .unwrap();
+    let mut resumed =
+        VerifyDriver::resume(source(&pack), REPOSITORY, profile(), limits, 18, &snapshot).unwrap();
     assert_eq!(host.finish(&mut resumed).unwrap().counts().entries, 2);
 
     // Unknown deferred codes and incoherent phase/mode combinations never encode.
@@ -87,7 +86,7 @@ fn canonical_verify_checkpoint_fixture() {
                 cursor: &state.cursor,
                 verify: Some(verify)
             },
-            limits()
+            limits
         )
         .unwrap_err()
         .code,

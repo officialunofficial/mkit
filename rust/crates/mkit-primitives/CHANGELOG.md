@@ -42,6 +42,17 @@ Initial public contract (0.1.0, not yet published).
 
 ### Changed
 
+- `VerifyLimits::indexed()` raises the default `work` budget from 1,000,000,000
+  to `16 << 30` (17,179,869,184). The all-entry driver charges about
+  70,000–108,000 work units per raw 4 KiB blob entry, growing slowly with index
+  size, so the previous default refused ordinary packs of more than about
+  11,000 small entries while every other budget had headroom. Charging rules,
+  refusal codes, refusal order, evidence formats and `IndexedProfile` content
+  ceilings are unchanged; hosts with an explicit `work` override see no
+  change. Checkpoints taken under the old default are not resumable under
+  the new one, so in-flight verifications restart. The README's sizing
+  section gives the measured table and the override formula.
+
 - `ComputeConfig` adds `min_job_bytes` and becomes non-exhaustive. Construct it
   with `ComputeConfig::new(max_jobs)` and optionally call
   `.with_min_job_bytes(bytes)`. Raw entries below the default 64 KiB threshold

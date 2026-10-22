@@ -18,6 +18,16 @@ fn verify(bytes: &[u8]) -> Result<u32, FailureCode> {
     verify_run(bytes, false)
 }
 
+/// Limits matching what the frozen checkpoint fixtures were encoded under;
+/// keep the original `work` ceiling so a default-profile change cannot
+/// churn them.
+fn frozen_limits() -> VerifyLimits {
+    VerifyLimits {
+        work: 1_000_000_000,
+        ..VerifyLimits::indexed()
+    }
+}
+
 fn verify_run(bytes: &[u8], restart: bool) -> Result<u32, FailureCode> {
     let pack_source = PackSource {
         id: hash::hash(bytes),
@@ -154,7 +164,7 @@ fn portable_checkpoint_resume_and_authenticated_absence_execute() {
         binding: SourceBinding([7; 32]),
     };
     let repository = RepositoryId([9; 32]);
-    let limits = VerifyLimits::indexed();
+    let limits = frozen_limits();
     let snapshot = Checkpoint::from_bytes(
         include_bytes!("../../mkit-primitives/fixtures/evidence/checkpoint-header.bin"),
         limits,
