@@ -67,7 +67,7 @@ impl NamespaceStore for LeaseReads {
     fn reserve_read_calls(&self, calls: u32) -> Result<Option<ReadReservation>, StoreError> {
         if self
             .remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
                 left.checked_sub(calls)
             })
             .is_err()

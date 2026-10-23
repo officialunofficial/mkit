@@ -45,32 +45,6 @@ beforeAll(async () => {
         async destroy() { this.stopped = true; }
       }
     `,
-        "workspace-runner": `
-      export async function runWorkspaceTask({ state, serial, signal, task }) {
-        await serial(async () => {
-          await state.storage.put('test:runnerStarted', true);
-          if (task.prompt === 'Hold the command queue') {
-            await new Promise(resolve => {
-              signal.addEventListener('abort', resolve, { once: true });
-              if (signal.aborted) resolve();
-            });
-            if (signal.aborted) await state.storage.put('test:runnerAborted', true);
-          }
-        });
-        await serial(async () => {
-          const current = await state.storage.get('task');
-          if (signal.aborted || current.status === 'cancelled') {
-            await state.storage.put('task', { ...current, status: 'cancelled', finishedAt: Date.now() });
-          } else {
-            const publication = await state.publishedVersion(await state.files(), 'Agent finished');
-            await state.storage.put({ ...publication.writes,
-              task: { ...current, status: 'completed', finishedAt: Date.now(), versionHash: publication.writes.meta.head },
-              ...state.message('assistant', 'Private agent conversation'),
-            });
-          }
-        });
-      }
-    `,
         sandbox: `import { DurableObject } from 'cloudflare:workers'; export class Sandbox extends DurableObject {}`,
     };
     const bundle = await build({
@@ -119,7 +93,7 @@ beforeAll(async () => {
                 name: "controlled-external-systems",
                 setup(builder) {
                     builder.onResolve(
-                        { filter: /^\.\/(source|sandbox-files|workspace-runner)$/ },
+                        { filter: /^\.\/(source|sandbox-files)$/ },
                         (args) => ({ path: args.path.slice(2), namespace: "test-fixture" }),
                     );
                     builder.onResolve({ filter: /^@cloudflare\/sandbox$/ }, () => ({
@@ -169,10 +143,6 @@ beforeAll(async () => {
             r2Buckets: ["OBJECTS"],
             bindings: {
                 AUTH_AUDIENCE: AUDIENCE,
-                GROQ_MODEL: "openai/gpt-oss-120b",
-                GROQ_API_KEY: "unused-test-key",
-                MAX_DAILY_MODEL_REQUESTS: "900",
-                MAX_DAILY_MODEL_TOKENS: "180000",
             },
         }),
     );
@@ -425,20 +395,8 @@ describe("workspace HTTP coordinator with real auth and storage", () => {
         expect(directory.workspaces.some((item) => item.id === prepared.id)).toBe(true);
     });
 
-    it("keeps task and chat private, rejects another identity, and revokes read sessions on logout", async () => {
+    it("rejects another identity, and revokes read sessions on logout", async () => {
         const { owner, prepared, cookie } = await project();
-        await fixture(prepared.id, {
-            task: { id: "task", prompt: "Owner-only prompt", status: "completed", createdAt: 1 },
-            "message:0000000000001:private": {
-                id: "private",
-                role: "assistant",
-                text: "Owner-only response",
-                createdAt: 1,
-            },
-        });
-        expect(await view(prepared.id)).toMatchObject({ isOwner: false, messages: [], task: null });
-        expect(JSON.stringify(await view(prepared.id))).not.toContain("Owner-only");
-        expect((await view(prepared.id, cookie)).messages).toHaveLength(1);
         expect(
             (await signed(identity(), prepared.id, `/api/workspaces/${prepared.id}/session`, {}))
                 .status,
@@ -458,11 +416,7 @@ describe("workspace HTTP coordinator with real auth and storage", () => {
         });
         expect(logout.status).toBe(200);
         expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
-        expect(await view(prepared.id, cookie)).toMatchObject({
-            isOwner: false,
-            messages: [],
-            task: null,
-        });
+        expect(await view(prepared.id, cookie)).toMatchObject({ isOwner: false });
         const renewed = await signed(
             owner,
             prepared.id,
@@ -619,95 +573,8 @@ describe("workspace HTTP coordinator with real auth and storage", () => {
         const response = await signed(owner, prepared.id, path, payload);
         expect(response.status).toBe(200);
         expect((await response.json() as WorkspaceView).files).toContainEqual({ path: "constructor", size: 210000, mode: "blob", hash: expect.stringMatching(/^[0-9a-f]{64}$/) });
-        await fixture(prepared.id, { task: { id: "busy", prompt: "Working", status: "running", createdAt: Date.now() } });
-        expect((await signed(owner, prepared.id, path, { message: "Busy" })).status).toBe(409);
         await fixture(prepared.id, { revoked: true });
         expect((await signed(owner, prepared.id, path, { message: "Revoked" })).status).toBe(403);
-    });
-
-    it("runs a queued task after the request ends and automatically publishes a version", async () => {
-        const { owner, prepared, view: initial } = await project();
-        const response = await signed(owner, prepared.id, `/api/workspaces/${prepared.id}/tasks`, {
-            prompt: "Complete this task",
-        });
-        expect(response.status).toBe(200);
-        expect(await response.json()).toMatchObject({ task: { status: "queued" } });
-        await waitFor(
-            prepared.id,
-            (value) => (value.task as { status?: string })?.status === "completed",
-        );
-        const current = await view(prepared.id);
-        expect(current.workspace.head).not.toBe(initial.workspace.head);
-        expect(current.versions).toHaveLength(2);
-        expect(current.messages).toEqual([]);
-        expect(current.task).toBeNull();
-    });
-
-    it("cancels a running task even while its command holds the serial queue", async () => {
-        const { owner, prepared } = await project();
-        expect(
-            (
-                await signed(owner, prepared.id, `/api/workspaces/${prepared.id}/tasks`, {
-                    prompt: "Hold the command queue",
-                })
-            ).status,
-        ).toBe(200);
-        await waitFor(prepared.id, (value) => value["test:runnerStarted"] === true);
-        const cancellation = await signed(
-            owner,
-            prepared.id,
-            `/api/workspaces/${prepared.id}/cancel`,
-            {},
-        );
-        expect(cancellation.status).toBe(200);
-        expect(await cancellation.json()).toMatchObject({ task: { status: "cancelled" } });
-        const current = await inspect(prepared.id);
-        expect(current.task).toMatchObject({ status: "cancelled" });
-    }, 5000);
-
-    it("does not cancel a newer task when an earlier cancellation is replayed", async () => {
-        const { owner, prepared } = await project();
-        const path = `/api/workspaces/${prepared.id}/cancel`;
-        const originalCancellation = envelope(owner, prepared.id, path, {});
-        expect((await mf.dispatchFetch(AUDIENCE + path, originalCancellation)).status).toBe(200);
-        expect(
-            (
-                await signed(owner, prepared.id, `/api/workspaces/${prepared.id}/tasks`, {
-                    prompt: "Hold the command queue",
-                })
-            ).status,
-        ).toBe(200);
-        await waitFor(prepared.id, (value) => value["test:runnerStarted"] === true);
-        try {
-            const replay = await mf.dispatchFetch(AUDIENCE + path, originalCancellation);
-            expect(replay.status).toBe(200);
-            const state = await inspect(prepared.id);
-            expect(state["test:runnerAborted"]).toBeUndefined();
-            expect(state.task).toMatchObject({ status: "running" });
-        } finally {
-            await signed(owner, prepared.id, path, {});
-        }
-    }, 5000);
-
-    it("returns an actionable allowance response when task admission is exhausted", async () => {
-        const { owner, prepared } = await project();
-        await mf.dispatchFetch(AUDIENCE + "/__test/directory", {
-            method: "POST",
-            body: JSON.stringify({
-                id: prepared.id,
-                writes: {
-                    [`tasks:${Math.floor(Date.now() / 86400000)}:${owner.publicKey}`]: 12,
-                },
-            }),
-        });
-        const response = await signed(owner, prepared.id, `/api/workspaces/${prepared.id}/tasks`, {
-            prompt: "Beyond daily allowance",
-        });
-        expect(response.status).toBe(429);
-        expect(await response.json()).toMatchObject({
-            error: expect.stringContaining("allowance"),
-        });
-        expect((await inspect(prepared.id)).task).toBeUndefined();
     });
 
     it("requires the owner session and same-origin WebSocket handshake for the terminal", async () => {
@@ -838,46 +705,6 @@ describe("workspace HTTP coordinator with real auth and storage", () => {
         } finally {
             socket.close();
         }
-    });
-
-    it("marks a crashed running task interrupted without replaying its command", async () => {
-        const { prepared } = await project();
-        await fixture(prepared.id, {
-            task: { id: "crashed", prompt: "Never replay me", status: "running", createdAt: 1 },
-        });
-        const alarm = await mf.dispatchFetch(`${AUDIENCE}/__test/alarm`, {
-            method: "POST",
-            body: JSON.stringify({ id: prepared.id }),
-        });
-        expect(alarm.status).toBe(200);
-        const result = await inspect(prepared.id);
-        expect(result.task).toMatchObject({
-            status: "failed",
-            error: expect.stringContaining("restarted"),
-        });
-        expect(result["test:runnerStarted"]).toBeUndefined();
-    });
-
-    it("fails a queued task when authorization expires before it can start", async () => {
-        const { prepared, view: initial } = await project();
-        await fixture(prepared.id, {
-            task: { id: "expired", prompt: "Do not execute", status: "queued", createdAt: 1 },
-            grant: {
-                ...initial.grant,
-                grant: { ...initial.grant!.grant, expiresAt: Date.now() - 1 },
-            },
-        });
-        const alarm = await mf.dispatchFetch(`${AUDIENCE}/__test/alarm`, {
-            method: "POST",
-            body: JSON.stringify({ id: prepared.id }),
-        });
-        expect(alarm.status).toBe(200);
-        const result = await inspect(prepared.id);
-        expect(result.task).toMatchObject({
-            status: "failed",
-            error: expect.stringContaining("authorization"),
-        });
-        expect(result["test:runnerStarted"]).toBeUndefined();
     });
 
     it("discovers the newest projects even after the directory contains more than 500 entries", async () => {

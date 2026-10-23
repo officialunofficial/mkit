@@ -3,9 +3,7 @@ import type {
     AgentGrant,
     SignedAgentGrant,
     WorkspaceChange,
-    WorkspaceMessage,
     WorkspaceSummary,
-    WorkspaceTask,
     WorkspaceVersion,
     WorkspaceView,
 } from "./contracts";
@@ -28,7 +26,7 @@ type Receipt = {
 };
 type ReceiptResponse = { body: WorkspaceView; headers?: Record<string, string> };
 // SQLite's key/value row limit is 2 MB. Owner views can exceed it once a
-// conversation, version list and long file paths are combined. Persist the exact
+// version list and long file paths are combined. Persist the exact
 // replay response in bounded rows, all under the mutation's transaction.
 const RECEIPT_PART_CHARS = 32 * 1024;
 const MAX_RECEIPT_PARTS = 64;
@@ -124,18 +122,6 @@ export class WorkspaceState {
             ).values(),
         ];
         const grant = (await storage.get<SignedAgentGrant>("grant")) ?? null;
-        const messages = isOwner
-            ? [
-                  ...(
-                      await storage.list<WorkspaceMessage>({
-                          prefix: "message:",
-                          reverse: true,
-                          limit: 60,
-                      })
-                  ).values(),
-              ].reverse()
-            : [];
-        const task = isOwner ? ((await storage.get<WorkspaceTask>("task")) ?? null) : null;
         return {
             workspace,
             files: Object.entries(files)
@@ -143,8 +129,6 @@ export class WorkspaceState {
                 .sort((a, b) => a.path.localeCompare(b.path)),
             changes,
             versions,
-            messages,
-            task,
             isOwner,
             grant,
             agentEnabled:
@@ -243,19 +227,6 @@ export class WorkspaceState {
             throw new HttpError(409, "This operation was used for another request.");
         const response = await receiptResponse(this.storage, auth.nonce, receipt);
         return json(response.body, 200, response.headers);
-    }
-
-    message(role: WorkspaceMessage["role"], text: string): Record<string, WorkspaceMessage> {
-        const id = crypto.randomUUID(),
-            createdAt = Date.now();
-        return {
-            [`message:${String(createdAt).padStart(13, "0")}:${id}`]: {
-                id,
-                role,
-                text: text.slice(0, 12000),
-                createdAt,
-            },
-        };
     }
 
     async preparedGrant(): Promise<AgentGrant> {

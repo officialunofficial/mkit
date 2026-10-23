@@ -221,7 +221,7 @@ fn body_from_sidecar(dir: &std::path::Path, name: &str, sidecar: &Value) -> Vec<
         } else {
             let insert_hex = segment["hex"].as_str().unwrap();
             assert_eq!(insert_hex.len() % 2, 0);
-            for pair in insert_hex.as_bytes().chunks_exact(2) {
+            for pair in insert_hex.as_bytes().as_chunks::<2>().0 {
                 assert!(pair.iter().all(u8::is_ascii_hexdigit));
                 out.push(u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap());
             }

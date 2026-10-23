@@ -61,32 +61,12 @@ export type WorkspaceVersion = {
     createdAt: number;
 };
 
-export type WorkspaceMessage = {
-    id: string;
-    role: "user" | "assistant" | "system";
-    text: string;
-    createdAt: number;
-};
-
-export type WorkspaceTask = {
-    id: string;
-    prompt: string;
-    status: "queued" | "running" | "completed" | "cancelled" | "failed";
-    createdAt: number;
-    finishedAt?: number;
-    error?: string;
-    versionHash?: string;
-};
-
 export type WorkspaceView = {
     workspace: WorkspaceSummary;
     files: WorkspaceFile[];
     /** Current working files versus saved HEAD, including when viewing an older version. */
     changes: WorkspaceChange[];
     versions: WorkspaceVersion[];
-    /** Conversation and task details are returned only to the authenticated owner. */
-    messages: WorkspaceMessage[];
-    task: WorkspaceTask | null;
     isOwner: boolean;
     grant: SignedAgentGrant | null;
     agentEnabled: boolean;

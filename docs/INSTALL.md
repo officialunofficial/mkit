@@ -35,7 +35,7 @@ Source builds are the right path for contributors and air-gapped CI. For
 everyday CLI use, `cargo install mkit-cli` from crates.io (see
 [`README.md`](../README.md)) is the shortest route.
 
-**Toolchain.** Rust 1.95, edition 2024, pinned by
+**Toolchain.** Rust 1.99, edition 2024, pinned by
 [`rust/rust-toolchain.toml`](../rust/rust-toolchain.toml). `rustup` will
 auto-install on the first build.
 

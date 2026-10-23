@@ -7,7 +7,7 @@ description: >-
 
 inputs:
   toolchain:
-    description: Rust toolchain to install (e.g. "1.95.0", or an MSRV resolved at runtime).
+    description: Rust toolchain to install (e.g. "1.99.1", or an MSRV resolved at runtime).
     required: true
   components:
     description: Comma/space-separated rustup components (e.g. "rustfmt, clippy").

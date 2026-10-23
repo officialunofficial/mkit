@@ -5,14 +5,10 @@
   "compatibility_date": "2026-09-09",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
-  "secrets": { "required": ["GROQ_API_KEY"] },
   "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": true }],
   "routes": [{ "pattern": "mkit.sh/api/workspaces*", "zone_name": "mkit.sh" }],
   "vars": {
-    "AUTH_AUDIENCE": "https://mkit.sh",
-    "GROQ_MODEL": "openai/gpt-oss-120b",
-    "MAX_DAILY_MODEL_REQUESTS": "900",
-    "MAX_DAILY_MODEL_TOKENS": "180000"
+    "AUTH_AUDIENCE": "https://mkit.sh"
   },
   "durable_objects": {
     "bindings": [

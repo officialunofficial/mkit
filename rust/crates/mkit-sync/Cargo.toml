@@ -85,7 +85,7 @@ mkit-server = { version = "0.5", path = "../mkit-server", default-features = fal
 connectrpc = { version = "0.9.0", default-features = false, features = ["server"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
-base64 = "0.22"
+base64 = "0.23"
 buffa = "0.9.1"
 mkit-attest = { path = "../mkit-attest", features = ["grants"] }
 

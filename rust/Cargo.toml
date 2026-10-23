@@ -51,7 +51,7 @@ members = [
 [workspace.package]
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.95.0"
+rust-version = "1.99.1"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/officialunofficial/mkit"
 authors = ["Official Unofficial, Inc."]
@@ -106,6 +106,15 @@ missing_errors_doc = "allow"
 doc_lazy_continuation = "allow"
 # `module_inception` is fine for our generated buffa modules.
 module_inception = "allow"
+# `assert!(x.is_empty())` reads better than the suggested
+# `assert_eq!(x, [] as [T; 0])` and the call sites are overwhelmingly tests.
+assert_is_empty = "allow"
+# Trait impls for async traits (signers, transports, test doubles) must stay
+# `async fn` even when the body has no `.await`.
+unused_async_trait_impl = "allow"
+# Fixed-size record walks use `chunks_exact(N)` throughout; migrating them to
+# `as_chunks::<N>()` is a separate, per-site change.
+chunks_exact_to_as_chunks = "allow"
 # Downstream transitive deps (wit-bindgen via getrandom, hashbrown via tempfile)
 # carry their own duplicate-version baggage we do not control. Revisit once
 # the ecosystem converges.

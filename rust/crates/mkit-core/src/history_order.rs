@@ -402,7 +402,6 @@ impl TimestampDiscovery {
     }
 
     /// Remembered emitted ids in ascending (canonical encoded) order.
-    #[must_use]
     pub fn emitted(&self) -> impl ExactSizeIterator<Item = &Hash> {
         self.emitted.iter()
     }

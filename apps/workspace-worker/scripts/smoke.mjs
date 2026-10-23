@@ -1,5 +1,5 @@
-/** Opt-in live smoke: creates a public remix and uses one real model task.
- * node scripts/smoke.mjs http://localhost:8788 [--agent]
+/** Opt-in live smoke: creates a public remix against a running Worker.
+ * node scripts/smoke.mjs http://localhost:8788 [--terminal]
  * Signs with an isolated test identity; WebAuthn is tested separately in the UI. */
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
@@ -96,9 +96,8 @@ if (!saved) {
     );
     const pubView = await (await fetch(`${origin}/api/workspaces/${id}`)).json();
     assert.equal(pubView.isOwner, false);
-    assert.deepEqual(pubView.messages, []);
     assert.equal(pubView.versions.length, 2);
-    console.log("Public file/version and private conversation checks passed");
+    console.log("Public file/version checks passed");
 }
 if (!saved || process.argv.includes("--terminal")) {
     await new Promise((resolve, reject) => {
@@ -131,31 +130,6 @@ if (!saved || process.argv.includes("--terminal")) {
     });
     console.log("Real container PTY executed a shell command");
 }
-if (process.argv.includes("--cancel")) await request(`/${id}/cancel`, {}, id);
-if (process.argv.includes("--agent")) {
-    await request(
-        `/${id}/tasks`,
-        {
-            prompt: "Read smoke.txt and terminal.txt, then create sum.mjs exporting add(a,b). Run a Node assertion that add(2,3) is 5. Keep these files. Briefly report the test result.",
-        },
-        id,
-    );
-    console.log("Agent queued; no browser or WebSocket remains connected");
-    for (let i = 0; i < 75; i++) {
-        await new Promise((r) => setTimeout(r, 4000));
-        const view = await (
-            await fetch(`${origin}/api/workspaces/${id}`, { headers: { Cookie: cookie } })
-        ).json();
-        if (["completed", "failed", "cancelled"].includes(view.task?.status)) {
-            assert.equal(view.task.status, "completed", JSON.stringify(view.task));
-            assert.ok(view.files.some((f) => f.path === "sum.mjs"));
-            assert.ok(view.files.some((f) => f.path === "terminal.txt"));
-            console.log("Agent completed and signed version", view.task.versionHash);
-            break;
-        }
-        if (i === 74) throw new Error("Agent task timed out");
-    }
-}
 const logout = await fetch(`${origin}/api/workspaces/${id}/session`, {
     method: "DELETE",
     headers: { Origin: origin, Cookie: cookie },
@@ -166,4 +140,4 @@ assert.equal(
         .isOwner,
     false,
 );
-console.log("Logout invalidated session. Smoke passed:", `${origin}/create?id=${id}`);
+console.log("Logout invalidated session. Smoke passed:", `${origin}/api/workspaces/${id}`);

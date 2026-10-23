@@ -879,7 +879,7 @@ impl NamespaceStore for CountedStore {
                 "crash before source checkpoint",
             )));
         }
-        let terminal = batch.writes.iter().any(|w| matches!(w, crate::Write::Put(k,v) if k.as_bytes().starts_with(b"an\0") && serde_json::from_slice::<serde_json::Value>(v.as_bytes()).ok().is_some_and(|row| row.get("result").is_some_and(|result| !result.is_null()))));
+        let terminal = batch.writes.iter().any(|w| matches!(w, crate::Write::Put(k,v) if k.as_bytes().starts_with(b"an\0") && serde_json::from_slice::<serde_json::Value>(v.as_bytes()).is_ok_and(|row| row.get("result").is_some_and(|result| !result.is_null()))));
         let outcome = self.inner.apply(p, batch).await?;
         if terminal
             && self

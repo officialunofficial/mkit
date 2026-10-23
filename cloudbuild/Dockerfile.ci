@@ -10,10 +10,10 @@
 #   - sccache present from the start (no RUSTC_WRAPPER-before-install hazard).
 #
 # Rebuild (re-run cloudbuild/builder.yaml) when this file or rust-toolchain.toml
-# changes. The image tag (:rust-1.95.0) is the version contract — bump it in
+# changes. The image tag (:rust-1.99.1) is the version contract — bump it in
 # lockstep with rust/rust-toolchain.toml and the consuming configs' _CI_IMAGE
 # default.
-FROM rust:1.95.0-bookworm
+FROM rust:1.99.1-bookworm
 
 # Native build/link deps the workspace needs under --all-features (signers +
 # keystore). Mirrors rust.yml's "Install native signer deps" step:

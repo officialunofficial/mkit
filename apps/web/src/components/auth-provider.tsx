@@ -18,7 +18,6 @@ import { keysEnabled } from '../lib/keys-client'
 import { mkit } from '../lib/mkit'
 import { createIdentity, deriveEd25519Seed } from '../lib/passkey'
 import { WORKSPACE_API, workspaceRead, workspaceWrite } from '../lib/workspace-client'
-import { useWorkspaceDraftStore } from '../lib/workspace-draft-store'
 import { useSetName } from './multiplayer/player-label'
 import { errMsg } from './multiplayer/shared'
 import { bytesToHex, hexToBytes } from './use-mkit'
@@ -70,19 +69,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     refetchInterval: 60_000,
     retry: false,
   })
-  useEffect(() => {
-    const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (!useWorkspaceDraftStore.getState().scopes.size) return
-      event.preventDefault()
-      event.returnValue = ''
-    }
-    window.addEventListener('beforeunload', beforeUnload)
-    return () => window.removeEventListener('beforeunload', beforeUnload)
-  }, [])
   const observedSession = useRef<BrowserSession | null | undefined>(undefined)
   const session = sessionQuery.data
   const clearPrivate = useCallback(() => {
-    useWorkspaceDraftStore.getState().clearAll()
     void qc.cancelQueries({ queryKey: ['workspaces'] })
     qc.removeQueries({ queryKey: ['workspaces'] })
     for (const mutation of qc.getMutationCache().getAll()) {

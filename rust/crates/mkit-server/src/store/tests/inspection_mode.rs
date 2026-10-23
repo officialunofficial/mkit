@@ -446,7 +446,7 @@ fn restore_preserves_repository_release_fence_in_single_and_d34() {
         let restored = MemoryKv::default();
         block_on(restore(&snapshots, &restored, RestoreOptions::default())).unwrap();
         let holds = InspectionHolds::new(&restored, shards, &repo, "refs/heads/b");
-        assert!(holds.partition() == &shards.object_index(&repo, &[0; 32]));
+        assert_eq!(holds.partition(), &shards.object_index(&repo, &[0; 32]));
         assert!(block_on(holds.is_held(&[[1; 32]])).unwrap().is_empty());
         assert!(block_on(holds.plan_holds(&advance, &[[1; 32]])).is_err());
         assert!(

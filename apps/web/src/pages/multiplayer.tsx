@@ -17,12 +17,6 @@ export default function MultiplayerPage() {
         <p className='ds-note mt-1'>
           Everyone pushes to one shared repository. Sign a commit and push it to an existing branch or a new one.
         </p>
-        <p className='mt-2 text-sm'>
-          <Link to='/create' className='ds-link'>
-            Remix this demo
-          </Link>{' '}
-          into your own public project with files, a terminal, and nanocodex.
-        </p>
       </header>
       <DemoBoundary fallback={<MultiplayerSkeleton />}>
         <MultiplayerDemo />
@@ -36,4 +30,3 @@ export const getConfig = async () => {
     render: 'static',
   } as const
 }
-import { Link } from 'waku'

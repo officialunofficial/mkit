@@ -1196,7 +1196,7 @@ mod tests {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
         let refs = t.list_refs("refs/heads").unwrap();
-        assert!(refs.is_empty());
+        assert_eq!(refs, [] as [mkit_core::Ref; 0]);
     }
 
     #[test]

@@ -2,7 +2,6 @@
 
 import { Suspense, useState } from 'react'
 import { UserCircleIcon, FingerprintIcon, XIcon, SignOutIcon, LockIcon, LockOpenIcon } from '@phosphor-icons/react/ssr'
-import { useWorkspaceDraftStore } from '../lib/workspace-draft-store'
 import { ModalLayer } from './top-layer'
 import { useAuth } from './auth-provider'
 import { ErrorBoundary } from './error-boundary'
@@ -14,7 +13,6 @@ import { useMkit } from './use-mkit'
 export function Account() {
   const auth = useAuth()
   const [open, setOpen] = useState(false)
-  const [confirmSignOut, setConfirmSignOut] = useState(false)
   const [proofOpen, setProofOpen] = useState(false)
   const publicKey = auth.session?.publicKey ?? ''
   const signingUnlocked = !!publicKey && auth.unlocked
@@ -89,10 +87,7 @@ export function Account() {
                     className='btn btn--outlined btn--small'
                     type='button'
                     disabled={disabled}
-                    onClick={() => {
-                      if (useWorkspaceDraftStore.getState().scopes.size) setConfirmSignOut(true)
-                      else void auth.signOut()
-                    }}
+                    onClick={() => void auth.signOut()}
                   >
                     <SignOutIcon size={16} aria-hidden /> Sign out
                   </button>
@@ -116,7 +111,7 @@ export function Account() {
                   <p className='w-full text-muted'>
                     {state === 'error'
                       ? 'Could not load your account. Try again.'
-                      : 'Sign in with a passkey to open your projects. New to mkit? Create a passkey first.'}
+                      : 'Sign in with a passkey to use mkit. New to mkit? Create a passkey first.'}
                   </p>
                   <button
                     className={`btn ${auth.hasPasskey ? 'btn--outlined' : 'btn--solid'} btn--small`}
@@ -137,30 +132,6 @@ export function Account() {
                 </>
               )}
             </div>
-            {confirmSignOut && publicKey ? (
-              <ModalLayer label='Sign out and discard edits?' onClose={() => setConfirmSignOut(false)}>
-                <div className='mx-auto mt-24 max-w-md space-y-4 border border-hairline bg-page p-6'>
-                  <h2 className='text-lg font-semibold'>Sign out and discard edits?</h2>
-                  <p>Unsaved edits in your workspaces will be discarded.</p>
-                  <div className='flex justify-end gap-2'>
-                    <button type='button' className='btn btn--outlined' onClick={() => setConfirmSignOut(false)}>
-                      Keep editing
-                    </button>
-                    <button
-                      type='button'
-                      className='btn btn--solid'
-                      disabled={disabled}
-                      onClick={() => {
-                        setConfirmSignOut(false)
-                        void auth.signOut()
-                      }}
-                    >
-                      Sign out and discard
-                    </button>
-                  </div>
-                </div>
-              </ModalLayer>
-            ) : null}
             {auth.embeddedBrowserWarning ? <p className='text-xs text-muted'>{auth.embeddedBrowserWarning}</p> : null}
             {auth.status ? (
               <p role='status' className='text-xs text-muted'>

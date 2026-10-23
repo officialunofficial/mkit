@@ -484,7 +484,7 @@ fn abort(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
     let _ = writeln!(
         stderr,
         "rebase aborted; HEAD restored to {}",
-        &state.head_name
+        state.head_name
     );
     drop(stderr);
     if json {

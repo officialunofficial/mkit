@@ -11,7 +11,6 @@ import type {
     PreparedWorkspace,
     WorkspaceSource,
     WorkspaceSummary,
-    WorkspaceTask,
 } from "./contracts";
 import { errorResponse, HttpError, json, record, text } from "./http";
 import { decoder, encoder, fromHex, hex, mkit } from "./mkit";
@@ -25,13 +24,11 @@ import {
 } from "./objects";
 import { SandboxWorkspace } from "./sandbox-files";
 import { WorkspaceState, type Mutation } from "./workspace-state";
-import { runWorkspaceTask } from "./workspace-runner";
 import { applyVersionEdits, versionRequest } from "./version-edits";
 
 export class Workspace extends DurableObject<Env> {
     private state = new WorkspaceState(this.ctx.storage, this.env.OBJECTS);
     private queue: Promise<unknown> = Promise.resolve();
-    private active?: AbortController;
     private terminals = new Map<
         WebSocket,
         { upstream: WebSocket; session: string; until: number }
@@ -225,10 +222,9 @@ export class Workspace extends DurableObject<Env> {
                     403,
                     "This workspace belongs to another identity. Remix it to make changes.",
                 );
-            if (action === "cancel" || action === "revoke") {
+            if (action === "revoke") {
                 const previous = await this.state.replay(auth);
                 if (previous) return previous;
-                this.active?.abort(new Error("Task cancelled"));
             }
             return await this.serial(async () => {
                 const previous = await this.state.replay(auth);
@@ -254,21 +250,8 @@ export class Workspace extends DurableObject<Env> {
                 } else {
                     await this.state.requireActive();
                     mutation = { writes: {} };
-                    if (
-                        action !== "session" &&
-                        action !== "cancel" &&
-                        action !== "revoke" &&
-                        action !== "conversation"
-                    )
-                        await this.state.requireAgent();
-                    const task = await this.ctx.storage.get<WorkspaceTask>("task"),
-                        busy = task?.status === "queued" || task?.status === "running";
+                    if (action !== "session" && action !== "revoke") await this.state.requireAgent();
                     if (action === "file" || action === "restore" || action === "versions") {
-                        if (busy)
-                            throw new HttpError(
-                                409,
-                                "Wait for the agent to finish or cancel its task before editing.",
-                            );
                         const checkpoint = action === "versions" ? versionRequest(body) : undefined;
                         await this.stopTerminals();
                         let files: FileManifest;
@@ -303,51 +286,9 @@ export class Workspace extends DurableObject<Env> {
                             checkpoint?.message ?? (action === "restore" ? "Restore saved version" : `Save ${body.path}`),
                         );
                         mutation.writes = { ...mutation.writes, generation: randomToken() };
-                    } else if (action === "tasks") {
-                        if (busy) throw new HttpError(409, "An agent task is already running.");
-                        const prompt = text(body.prompt, 8000, "task");
-                        if (encoder.encode(prompt).length > 8000)
-                            throw new HttpError(400, "Keep the task under 8,000 bytes.");
-                        const admission = await this.env.DIRECTORY.getByName("global").admitTask(
-                            auth.publicKey,
-                            auth.nonce,
-                        );
-                        if (admission.error)
-                            throw new HttpError(
-                                admission.error.status,
-                                admission.error.message,
-                                admission.error.retryAfter,
-                            );
-                        await this.stopTerminals();
-                        const task: WorkspaceTask = {
-                            id: crypto.randomUUID(),
-                            prompt,
-                            status: "queued",
-                            createdAt: Date.now(),
-                        };
-                        mutation = {
-                            writes: { task, ...this.state.message("user", prompt) },
-                            alarm: Date.now() + 1,
-                        };
-                    } else if (action === "cancel" || action === "revoke") {
-                        this.active?.abort(new Error("Task cancelled"));
+                    } else if (action === "revoke") {
                         teardown = true;
-                        mutation.writes = {
-                            ...(action === "revoke" ? { revoked: true } : {}),
-                            ...(busy
-                                ? { task: { ...task, status: "cancelled", finishedAt: Date.now() } }
-                                : {}),
-                        };
-                    } else if (action === "conversation") {
-                        if (busy)
-                            throw new HttpError(
-                                409,
-                                "Wait for the task to finish or cancel it first.",
-                            );
-                        const keys = [
-                            ...(await this.ctx.storage.list({ prefix: "message:" })).keys(),
-                        ];
-                        mutation = { deletes: ["snapshot", "task", ...keys] };
+                        mutation.writes = { revoked: true };
                     } else if (action !== "session")
                         throw new HttpError(404, "Workspace route not found.");
                 }
@@ -385,12 +326,6 @@ export class Workspace extends DurableObject<Env> {
                 throw new HttpError(403, "Unlock your passkey to open the terminal.");
             if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket")
                 throw new HttpError(426, "WebSocket required.");
-            const task = await this.ctx.storage.get<WorkspaceTask>("task");
-            if (task?.status === "running" || task?.status === "queued")
-                throw new HttpError(
-                    409,
-                    "The agent is using the terminal. Reconnect when its task finishes.",
-                );
             if (this.terminals.size >= 2)
                 throw new HttpError(429, "Close another terminal before opening this one.");
             const box = await this.box(),
@@ -457,43 +392,8 @@ export class Workspace extends DurableObject<Env> {
         });
     }
     async alarm(): Promise<void> {
-        const task = await this.serial(async () => {
+        await this.serial(async () => {
             if (await this.ctx.storage.get("publishPending")) await this.publish();
-            const task = await this.ctx.storage.get<WorkspaceTask>("task");
-            if (task?.status === "running" && !this.active) {
-                await this.ctx.storage.put({
-                    task: {
-                        ...task,
-                        status: "failed",
-                        finishedAt: Date.now(),
-                        error: "The worker restarted during this task. Saved files are preserved; submit a new task to continue.",
-                    },
-                    ...this.state.message(
-                        "system",
-                        "Task interrupted by a worker restart. Saved files are preserved.",
-                    ),
-                });
-                return undefined;
-            }
-            if (task?.status === "queued") {
-                try {
-                    await this.state.requireAgent();
-                } catch {
-                    await this.ctx.storage.put("task", {
-                        ...task,
-                        status: "failed",
-                        finishedAt: Date.now(),
-                        error: "Agent authorization has expired or been revoked.",
-                    });
-                    return undefined;
-                }
-                const running = { ...task, status: "running" as const };
-                this.active = new AbortController();
-                await this.ctx.storage.put("task", running);
-                // Recovery alarm marks a crashed run interrupted; uncertain shell commands are never replayed.
-                await this.ctx.storage.setAlarm(Date.now() + 6 * 60000);
-                return running;
-            }
             if (!this.terminals.size && (await this.ctx.storage.get("terminalOpen")))
                 await this.stopTerminals();
             if (this.terminals.size) {
@@ -512,26 +412,6 @@ export class Workspace extends DurableObject<Env> {
             }
             await this.captureTerminalDraft();
             if (this.terminals.size) await this.ctx.storage.setAlarm(Date.now() + 10000);
-            return undefined;
         });
-        if (!task) return;
-        const active = this.active!,
-            timer = setTimeout(
-                () => active.abort(new Error("Task reached its five-minute limit")),
-                5 * 60000,
-            );
-        try {
-            await runWorkspaceTask({
-                state: this.state,
-                sandbox: await this.box(),
-                env: this.env,
-                serial: this.serial,
-                signal: active.signal,
-                task,
-            });
-        } finally {
-            clearTimeout(timer);
-            this.active = undefined;
-        }
     }
 }

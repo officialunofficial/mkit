@@ -1208,7 +1208,7 @@ mod tests {
         );
         let verify = state.verify.expect("v4 checkpoint carries verify state");
         assert_eq!(verify.objects.count, verify.ordinals.count);
-        assert!(verify.occurrences.count == 1);
+        assert_eq!(verify.occurrences.count, 1);
         assert_eq!(verify.delta_entries, 0);
         assert_eq!(verify.decoded, 15);
         assert_eq!(verify.edges, 0);

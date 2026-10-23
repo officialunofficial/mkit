@@ -423,7 +423,7 @@ impl Stub {
                                     .unwrap()
                                     .push(req.signed_statement.clone().unwrap_or_default());
                                 let pending = left
-                                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                                         n.checked_sub(1)
                                     })
                                     .is_ok();
@@ -866,7 +866,7 @@ fn ctrl_c_cancels_a_pending_bump_and_says_it_may_still_complete() {
     let text = stderr(&out);
     assert!(text.contains("interrupted"), "{text}");
     assert!(text.contains("may still complete"), "{text}");
-    assert!(out.stdout.is_empty());
+    assert_eq!(out.stdout, [] as [u8; 0]);
 }
 
 #[cfg(unix)]
@@ -968,7 +968,7 @@ fn a_split_push_reports_its_steps_and_the_published_prefix() {
     let quiet = copy_of(&master, &live, "quiet");
     let out = quiet.run(&["push", "--quiet", "origin"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(out.stdout.is_empty());
+    assert_eq!(out.stdout, [] as [u8; 0]);
     assert!(!stderr(&out).contains("step"), "{}", stderr(&out));
 
     // Interrupted after the first advance: the error reports the prefix.

@@ -70,7 +70,7 @@ reference-runner = ["test-host"]
 
 [dependencies]
 mkit-rpc = { version = "0.5", path = "../mkit-rpc" }
-base64 = "0.22"
+base64 = "0.23"
 mkit-server = { version = "0.5", path = "../mkit-server", features = ["memory"], optional = true }
 mkit-core = { version = "0.5", path = "../mkit-core", default-features = false }
 mkit-attest = { version = "0.5", path = "../mkit-attest", default-features = false, features = ["grants"] }
@@ -112,11 +112,11 @@ reqwest = { version = "0.13", default-features = false, features = [
     "stream",
 ], optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }
-tower-http = { version = "0.6", default-features = false, features = ["cors"], optional = true }
+tower-http = { version = "0.7", default-features = false, features = ["cors"], optional = true }
 
 [dev-dependencies]
 mkit-client = { version = "0.5", path = "../mkit-client" }
-base64 = "0.22"
+base64 = "0.23"
 mkit-cli = { version = "0.5", path = "../mkit-cli" }
 # The `.mkit`-layout stores `mkit serve` uses, for tests/fs_backends.rs.
 mkit-server = { version = "0.5", path = "../mkit-server", features = ["memory", "fs"] }

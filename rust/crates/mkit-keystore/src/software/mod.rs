@@ -934,7 +934,7 @@ fn hex_decode(input: &str) -> Result<Vec<u8>> {
         return Err(Error::Encoding("hex string has odd length".into()));
     }
     let mut out = Vec::with_capacity(input.len() / 2);
-    for chunk in input.as_bytes().chunks_exact(2) {
+    for chunk in input.as_bytes().as_chunks::<2>().0 {
         let hi = hex_value(chunk[0])?;
         let lo = hex_value(chunk[1])?;
         out.push((hi << 4) | lo);

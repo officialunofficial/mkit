@@ -13,7 +13,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Rust toolchain. rust/rust-toolchain.toml pins 1.95.0 and rustup resolves
+# Rust toolchain. rust/rust-toolchain.toml pins 1.99.1 and rustup resolves
 # it when cargo runs inside rust/, but the wasm32 target is not listed
 # there and must be added explicitly.
 if ! command -v rustup >/dev/null 2>&1; then
@@ -21,8 +21,8 @@ if ! command -v rustup >/dev/null 2>&1; then
 fi
 # shellcheck disable=SC1091
 . "$HOME/.cargo/env" 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
-rustup toolchain install 1.95.0 --profile minimal
-rustup target add wasm32-unknown-unknown --toolchain 1.95.0
+rustup toolchain install 1.99.1 --profile minimal
+rustup target add wasm32-unknown-unknown --toolchain 1.99.1
 
 # wasm-pack: prebuilt binary (cargo install would compile it from source,
 # which blows most of the build budget). Version matches web.yml CI.

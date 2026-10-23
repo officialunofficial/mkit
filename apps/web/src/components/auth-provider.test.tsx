@@ -4,7 +4,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { AuthProvider, AUTH_CHANGE_KEY, SESSION_KEY, useAuth } from './auth-provider'
-import { useWorkspaceDraftStore } from '../lib/workspace-draft-store'
 import { useIdentityStore } from '../lib/identity-store'
 const fake = vi.hoisted(() => {
   const values = new Map<string, string>()
@@ -55,7 +54,6 @@ function deferred<T>() {
 }
 beforeEach(() => {
   vi.clearAllMocks()
-  useWorkspaceDraftStore.getState().clearAll()
   useIdentityStore.getState().reset()
   fake.read.mockResolvedValue(null)
   fake.create.mockResolvedValue({
@@ -253,46 +251,4 @@ it('keeps failed sign-out retryable with signing locked', async () => {
   })
   expect(result.current.one.session).toBeNull()
   expect(fake.fetch).toHaveBeenCalledTimes(2)
-})
-
-it('guards unsaved drafts globally, preserves them while signing locks, and clears them on sign-out', async () => {
-  fake.read.mockResolvedValue(session)
-  const { result } = mount()
-  await waitFor(() => expect(result.current.one.session).toEqual(session))
-  useWorkspaceDraftStore.getState().setDraft('session:workspace', {
-    path: 'README.md',
-    content: 'edited',
-    original: '',
-    hash: null,
-    editable: true,
-  })
-  const dirtyUnload = new Event('beforeunload', { cancelable: true })
-  window.dispatchEvent(dirtyUnload)
-  expect(dirtyUnload.defaultPrevented).toBe(true)
-  await act(async () => {
-    await result.current.one.lockSigning()
-  })
-  expect(useWorkspaceDraftStore.getState().scopes.size).toBe(1)
-  await act(async () => {
-    await result.current.one.signOut()
-  })
-  expect(useWorkspaceDraftStore.getState().scopes.size).toBe(0)
-  const cleanUnload = new Event('beforeunload', { cancelable: true })
-  window.dispatchEvent(cleanUnload)
-  expect(cleanUnload.defaultPrevented).toBe(false)
-})
-
-it('clears drafts when the server session is replaced', async () => {
-  fake.read.mockResolvedValue(session)
-  const { result } = mount()
-  await waitFor(() => expect(result.current.one.session).toEqual(session))
-  useWorkspaceDraftStore.getState().setDraft('session:workspace', {
-    path: 'README.md',
-    content: 'edited',
-    original: '',
-    hash: null,
-    editable: true,
-  })
-  act(() => client.setQueryData(SESSION_KEY, { ...session, id: 'replacement' }))
-  await waitFor(() => expect(useWorkspaceDraftStore.getState().scopes.size).toBe(0))
 })

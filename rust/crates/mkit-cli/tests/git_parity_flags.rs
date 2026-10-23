@@ -630,11 +630,7 @@ fn merge_abort_after_clean_no_commit_succeeds() {
         "abort discarded the merge"
     );
     assert_eq!(rev(&repo, "HEAD"), head_before, "HEAD restored");
-    assert!(
-        stdout(&repo.ok(&["status", "--porcelain"]))
-            .trim()
-            .is_empty()
-    );
+    assert_eq!(stdout(&repo.ok(&["status", "--porcelain"])).trim(), "");
 }
 
 #[test]
@@ -732,11 +728,7 @@ fn merge_abort_discards_operation_authored_clean_paths() {
         "abort discarded the clean op-authored file"
     );
     assert_eq!(rev(&repo, "HEAD"), head0, "HEAD restored");
-    assert!(
-        stdout(&repo.ok(&["status", "--porcelain"]))
-            .trim()
-            .is_empty()
-    );
+    assert_eq!(stdout(&repo.ok(&["status", "--porcelain"])).trim(), "");
 }
 
 #[test]
@@ -1053,11 +1045,7 @@ fn merge_file_vs_directory_conflict_is_atomic_and_abortable() {
         b"inner\n",
         "ours directory restored"
     );
-    assert!(
-        stdout(&repo.ok(&["status", "--porcelain"]))
-            .trim()
-            .is_empty()
-    );
+    assert_eq!(stdout(&repo.ok(&["status", "--porcelain"])).trim(), "");
 }
 
 /// base has x.txt + y.txt; feature deletes x.txt, main deletes y.txt, so a
@@ -1107,11 +1095,7 @@ fn merge_abort_after_empty_no_commit_restores_head() {
     assert_eq!(rev(&repo, "HEAD"), head0, "HEAD restored to pre-merge");
     // main still had x.txt (it only deleted y.txt) → restored.
     assert!(repo.path().join("x.txt").exists(), "main's x.txt restored");
-    assert!(
-        stdout(&repo.ok(&["status", "--porcelain"]))
-            .trim()
-            .is_empty()
-    );
+    assert_eq!(stdout(&repo.ok(&["status", "--porcelain"])).trim(), "");
 }
 
 #[test]
@@ -1594,11 +1578,7 @@ fn merge_base_and_rev_list_peel_annotated_tags() {
     // rev-list must not error on an annotated tag.
     assert_eq!(stdout(&repo.ok(&["rev-list", "--count", "v1"])).trim(), "1");
     // merge-base (non-ancestor form) also peels.
-    assert!(
-        !stdout(&repo.ok(&["merge-base", "v1", "HEAD"]))
-            .trim()
-            .is_empty()
-    );
+    assert_ne!(stdout(&repo.ok(&["merge-base", "v1", "HEAD"])).trim(), "");
 }
 
 #[test]

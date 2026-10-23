@@ -1427,7 +1427,7 @@ mod faults {
             let stall = point == FaultPoint::BeforeFinalApply
                 && self
                     .left
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |l| l.checked_sub(1))
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |l| l.checked_sub(1))
                     .is_ok();
             if stall {
                 self.clock.advance(i64::try_from(WINDOW).unwrap() + 1);

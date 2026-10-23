@@ -740,7 +740,7 @@ impl NamespaceStore for RelayTimers<'_> {
         }
         let allowed = self
             .scan_rows
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
                 Some(remaining.saturating_sub(limit))
             })
             .unwrap_or(0)
@@ -1441,13 +1441,13 @@ mod relay_tick_tests {
             );
         }
         assert_eq!(store.stats(&target).await.unwrap().keys, Some(301)); // 300 puts plus relay watermark.
-        assert!(
+        assert_eq!(
             store
                 .scan(&source, &relay_start, &relay_end, None, 1)
                 .await
                 .unwrap()
-                .entries
-                .is_empty()
+                .entries,
+            [] as [(mkit_server::Key, mkit_server::Value); 0]
         );
     }
 }

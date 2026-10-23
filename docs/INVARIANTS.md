@@ -1429,9 +1429,8 @@ shell access under another person's delegated identity.
 **If violated:** a public link can leak conversations or execute commands without
 owner authorization; replaying a request can affect an unrelated later task.
 
-**Enforced by:** `apps/workspace-worker/src/auth.test.ts`,
-`apps/workspace-worker/src/workspace.integration.test.ts`, and the workspace client
-identity tests under `apps/web/src/components/workspace/`.
+**Enforced by:** `apps/workspace-worker/src/auth.test.ts` and
+`apps/workspace-worker/src/workspace.integration.test.ts`.
 
 ## Hosted task completion publishes a recoverable signed version
 
@@ -1447,8 +1446,7 @@ is independent of the project's durable files and versions.
 **If violated:** users lose completed work, see a completed task with no version,
 or execute a command twice during recovery.
 
-**Enforced by:** `apps/workspace-worker/src/workspace-state.test.ts`,
-`apps/workspace-worker/src/workspace-runner.test.ts`, and
+**Enforced by:** `apps/workspace-worker/src/workspace-state.test.ts` and
 `apps/workspace-worker/src/sandbox-files.test.ts`.
 
 ## Browser login and signing authority have separate lifetimes
@@ -1457,7 +1455,7 @@ or execute a command twice during recovery.
 
 **Because:** page navigation and cache reuse must not change identity or revive access after sign-out. Public recovery metadata is safe to persist; signing keys and private workspace state are not.
 
-**Enforced by:** `apps/web/src/components/auth-provider.test.tsx`, workspace query/editor tests, `apps/workspace-worker/src/browser-session.test.ts`, workspace integration tests, and `bun run verify:auth` in `apps/web`.
+**Enforced by:** `apps/web/src/components/auth-provider.test.tsx`, `apps/workspace-worker/src/browser-session.test.ts`, workspace integration tests, and `bun run verify:auth` in `apps/web`.
 
 ## A workspace version saves one coherent project state
 

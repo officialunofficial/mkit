@@ -757,7 +757,7 @@ fn interrupted_split_resumes_from_the_published_prefix() {
             keys.len(),
         )
     };
-    assert!(!failed_keys.is_empty());
+    assert_ne!(failed_keys, [] as [mkit_core::PackKey; 0]);
 
     // Re-running from the tracking ref (the last published head) finishes
     // with the same total, regenerating the interrupted step's packs.
@@ -1134,7 +1134,7 @@ fn every_published_head_contains_the_remote_head_it_replaced() {
         matches!(result, Err(DispatchError::PushTooLarge { .. })),
         "{result:?}"
     );
-    assert!(heads.is_empty());
+    assert_eq!(heads, [] as [[u8; 32]; 0]);
     assert_eq!(tx.advances.load(Ordering::SeqCst), advances_before);
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(theirs));
 }
