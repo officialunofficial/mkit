@@ -41,8 +41,8 @@ class ServerGates(unittest.TestCase):
         steps = re.split(r"(?m)^  - name: ", yaml)[1:]
         allocator, = [step for step in steps if "\n    id: server-allocator\n" in step]
         self.assertIn("entrypoint: bash", allocator)
-        self.assertIn("waitFor: [check]", allocator)
-        self.assertIn("timeout: 600s", allocator)
+        self.assertIn("waitFor: ['-']", allocator)
+        self.assertIn("timeout: 1500s", allocator)
         self.assertIn("        cd rust\n", allocator)
         self.assertIn("        cargo test --locked -p mkit-server --no-default-features --features memory,pack-ruzstd --test zstd_slice_heap_bounds -- --ignored --test-threads=1 --nocapture", allocator)
         self.assertNotIn("--all-features", allocator)
@@ -52,30 +52,78 @@ class ServerGates(unittest.TestCase):
         self.assertIn("entrypoint: python3", guard)
         self.assertIn("args: [scripts/test-server-gates.py, --hosted-only]", guard)
 
-    def test_cloud_workspace_test_compilation_is_serial(self):
+    def ci_steps(self):
         yaml = (ROOT / "cloudbuild/ci.yaml").read_text()
         steps = re.split(r"(?m)^  - name: ", yaml)[1:]
-        for step_id in ("check", "ignored-lane"):
-            step, = [s for s in steps if f"\n    id: {step_id}\n" in s]
+        return {re.search(r"(?m)^    id: (\S+)$", s).group(1): s for s in steps}
+
+    def test_cloud_workspace_test_compilation_is_serial(self):
+        steps = self.ci_steps()
+        archive = steps["nextest-archive"]
+        # One archive build compiles every workspace test binary. The serial
+        # Cargo job bound reserves memory for the unified server lib-test.
+        self.assertRegex(
+            archive,
+            r"(?m)^ +cargo nextest archive --locked --workspace --all-features --build-jobs 1 --archive-file /workspace/nextest-archive\.tar\.zst(?: |$)",
+        )
+        self.assertIn('"CARGO_PROFILE_TEST_CODEGEN_UNITS=256"', archive)
+        self.assertIn('"RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"', archive)
+        # The partitions and the ignored lane only run from the archive.
+        for step_id in ("nextest-1", "nextest-2", "nextest-3", "ignored-lane"):
             with self.subTest(step=step_id):
-                self.assertRegex(
-                    step,
-                    r"(?m)^ +cargo nextest run --locked --workspace --all-features --build-jobs 1(?: |$)",
-                )
-                self.assertIn('"CARGO_PROFILE_TEST_CODEGEN_UNITS=256"', step)
-                self.assertNotIn("allowFailure", step)
-                self.assertNotIn("allowExitCodes", step)
+                step = steps[step_id]
+                self.assertIn("--archive-file /workspace/nextest-archive.tar.zst", step)
+                self.assertNotRegex(step, r"cargo (build|test|check|clippy)\b")
+        for step in steps.values():
+            self.assertNotIn("allowFailure", step)
+            self.assertNotIn("allowExitCodes", step)
+
+    def test_cloud_parallel_step_graph(self):
+        steps = self.ci_steps()
+        ids = set(steps)
+        for step_id, step in steps.items():
+            match = re.search(r"(?m)^    waitFor: \[(.*)\]$", step)
+            self.assertIsNotNone(match, f"{step_id} has no waitFor")
+            for dep in [d.strip().strip("'\"") for d in match.group(1).split(",")]:
+                self.assertTrue(dep == "-" or dep in ids, f"{step_id} waits for unknown {dep}")
+        self.assertNotIn("check", ids)
+        # Partitions cover count:1/N .. count:N/N exactly once.
+        parts = sorted(i for i in ids if re.fullmatch(r"nextest-\d+", i))
+        self.assertTrue(parts)
+        for index, step_id in enumerate(parts, 1):
+            step = steps[step_id]
+            self.assertIn(f"--partition count:{index}/{len(parts)} ", step)
+            # contrib/signers is built before any workspace test runs.
+            self.assertIn("waitFor: [nextest-archive, signers-bin]", step)
+            self.assertIn("source /workspace/scripts/ci-swtpm-setup.sh", step)
+            self.assertIn('"MKIT_TEST_STRICT=1"', step)
+        self.assertIn("waitFor: [nextest-archive]", steps["ignored-lane"])
+        self.assertIn("source /workspace/scripts/ci-swtpm-setup.sh", steps["signers"])
+        # The build-only prerequisite is separate from the signers gates, so a
+        # gate failure cannot skip the partitions.
+        self.assertIn("cargo build --locked --all-features", steps["signers-bin"])
+        self.assertNotIn("cargo clippy", steps["signers-bin"])
+        self.assertNotIn("nextest run", steps["signers-bin"])
+        self.assertNotIn("CARGO_TARGET_DIR", steps["signers-bin"])
+        for step_id, step in steps.items():
+            self.assertNotRegex(step, r"(?m)^    waitFor: \[.*(?<![\w-])signers(?![\w-]).*\]$", step_id)
+        # The signers step must keep the default target directory.
+        self.assertNotIn("CARGO_TARGET_DIR", steps["signers"])
+        for step_id in ("signers", "apps-workers", "indexed", "tests-misc", "release-cli"):
+            self.assertIn('"MKIT_TEST_STRICT=1"', steps[step_id])
+        self.assertIn('"MKIT_TEST_EXTRACT_CHAIN=1"', steps["indexed"])
+        swtpm = (ROOT / "scripts/ci-swtpm-setup.sh").read_text()
+        self.assertIn("export MKIT_TEST_STRICT=1", swtpm)
+        self.assertIn("TPM2_Startup", swtpm)
 
     def cloud_rustc_wrapper(self):
-        yaml = (ROOT / "cloudbuild/ci.yaml").read_text()
-        steps = re.split(r"(?m)^  - name: ", yaml)[1:]
-        check, = [s for s in steps if "\n    id: check\n" in s]
-        self.assertIn('"RUSTC_WRAPPER=/tmp/mkit-ci-rustc"', check)
-        self.assertIn("        chmod +x /tmp/mkit-ci-rustc\n", check)
-        match = re.search(r"cat > /tmp/mkit-ci-rustc <<'SH'\n(.*?)\n        SH", check, re.S)
-        self.assertIsNotNone(match, "check must install its compiler wrapper before Cargo runs")
-        self.assertLess(match.start(), check.index("          cargo fetch --locked"))
-        return textwrap.dedent(match.group(1)) + "\n"
+        path = ROOT / "scripts/ci-rustc-wrapper.sh"
+        self.assertTrue(os.access(path, os.X_OK), "wrapper must be executable")
+        for step_id, step in self.ci_steps().items():
+            if step_id != "primitives" and '"RUSTC_WRAPPER=' in step:
+                with self.subTest(step=step_id):
+                    self.assertIn('"RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"', step)
+        return path.read_text()
 
     def test_cloud_step_scripts_fit_argument_limit(self):
         yaml = (ROOT / "cloudbuild/ci.yaml").read_text()
@@ -142,10 +190,12 @@ class ServerGates(unittest.TestCase):
             self.assertIn("wrapper stderr diagnostic", result.stderr)
 
     def test_cloud_nextest_reports_every_failure(self):
-        yaml = (ROOT / "cloudbuild/ci.yaml").read_text()
-        steps = re.split(r"(?m)^  - name: ", yaml)[1:]
-        for step_id in ("check", "ignored-lane"):
-            step, = [s for s in steps if f"\n    id: {step_id}\n" in s]
+        steps = self.ci_steps()
+        gated = ("lint", "signers", "apps-workers", "nextest-archive", "nextest-1",
+                 "nextest-2", "nextest-3", "ignored-lane", "indexed", "tests-misc",
+                 "release-cli", "wasm-gates")
+        for step_id in gated:
+            step = steps[step_id]
             with self.subTest(step=step_id):
                 # Assemble each test command, following `\` continuations.
                 commands = []
@@ -162,7 +212,8 @@ class ServerGates(unittest.TestCase):
                             command += lines[index]
                         commands.append(command)
                     index += 1
-                self.assertTrue(commands)
+                if step_id not in ("lint", "wasm-gates", "nextest-archive"):
+                    self.assertTrue(commands)
                 for command in commands:
                     # No failure is suppressed or skipped: each test command
                     # records into the step's aggregate status instead of
@@ -246,6 +297,7 @@ if __name__ == "__main__":
     if "--hosted-only" in sys.argv:
         suite = unittest.defaultTestLoader.loadTestsFromNames([
             "test_cloud_linux_allocator_executor", "test_cloud_workspace_test_compilation_is_serial",
+            "test_cloud_parallel_step_graph",
             "test_cloud_step_scripts_fit_argument_limit",
             "test_cloud_server_lib_test_preserves_cargo_jobserver",
             "test_cloud_wrapper_failure_is_visible_and_fails",
