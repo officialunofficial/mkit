@@ -83,6 +83,16 @@ stays `workflow_dispatch`-only on GitHub Actions by design; see
 `docs/RELEASE.md`'s pre-release checklist. Windows is not a supported
 target (MKIT-6; see `docs/INVARIANTS.md`).
 
+## Rust style
+
+Beyond `rustfmt` and a clean `clippy` run (both enforced in CI):
+
+- No `unwrap()` outside tests; use `expect("why this cannot fail")` only for a documented invariant.
+- No glob imports (`use foo::*`) outside test modules and preludes, and no `todo!()` or `dbg!()` in committed code.
+- Every `unsafe` block carries a `// SAFETY:` comment stating the invariant it relies on.
+- Public items have doc comments; comments explain why, not what.
+- Prefer small functions, early returns and exhaustive `match` over wildcard arms for enums we own.
+
 ## Pre-production compatibility policy
 
 mkit is not live in production. Changes may replace unshipped APIs and formats

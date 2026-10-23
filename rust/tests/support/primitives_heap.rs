@@ -17,6 +17,7 @@ fn account(size: usize) {
 // requested bytes only; they never alter allocation or ownership semantics.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: layout comes straight from the GlobalAlloc caller, so System upholds its contract.
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() {
             account(layout.size());
@@ -24,6 +25,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         pointer
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: layout comes straight from the GlobalAlloc caller, so System upholds its contract.
         let pointer = unsafe { System.alloc_zeroed(layout) };
         if !pointer.is_null() {
             account(layout.size());
@@ -32,6 +34,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         LIVE.fetch_sub(layout.size(), Ordering::SeqCst);
+        // SAFETY: ptr and layout come from the caller of dealloc, per the GlobalAlloc contract.
         unsafe { System.dealloc(pointer, layout) };
     }
 }

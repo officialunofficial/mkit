@@ -111,10 +111,8 @@ impl Drop for Workers {
 fn cpu() -> Duration {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     // SAFETY: getrusage initializes this valid output pointer on success.
-    assert_eq!(
-        unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
-        0
-    );
+    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    assert_eq!(status, 0);
     // SAFETY: the successful call initialized the entire rusage value.
     let usage = unsafe { usage.assume_init() };
     let seconds = usage.ru_utime.tv_sec + usage.ru_stime.tv_sec;

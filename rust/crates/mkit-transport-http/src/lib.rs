@@ -1023,6 +1023,7 @@ mod tests {
 
     #[test]
     fn connect_accepts_plain_http_for_local_dev() {
+        // SAFETY: single-threaded test process has no concurrent readers.
         unsafe { env::remove_var(TOKEN_ENV) };
         let t = HttpTransport::connect("mkit+http://localhost:8787/p").unwrap();
         assert_eq!(t.base().scheme(), "http");
@@ -1390,6 +1391,7 @@ mod tests {
 
     #[test]
     fn connect_rejects_http_non_loopback_as_insecure() {
+        // SAFETY: single-threaded test process has no concurrent readers.
         unsafe { env::remove_var(TOKEN_ENV) };
         let err = HttpTransport::connect("mkit+http://example.com/proj")
             .expect_err("non-loopback http must be refused");
@@ -1401,6 +1403,7 @@ mod tests {
 
     #[test]
     fn connect_accepts_http_on_loopback_ipv4() {
+        // SAFETY: single-threaded test process has no concurrent readers.
         unsafe { env::remove_var(TOKEN_ENV) };
         let t = HttpTransport::connect("mkit+http://127.0.0.1:1234/p").unwrap();
         assert_eq!(t.base().scheme(), "http");
@@ -1409,6 +1412,7 @@ mod tests {
 
     #[test]
     fn connect_accepts_http_on_loopback_ipv6() {
+        // SAFETY: single-threaded test process has no concurrent readers.
         unsafe { env::remove_var(TOKEN_ENV) };
         let t = HttpTransport::connect("mkit+http://[::1]:1234/p").unwrap();
         assert_eq!(t.base().scheme(), "http");
