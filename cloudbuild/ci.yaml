@@ -342,6 +342,8 @@ steps:
     entrypoint: bash
     env:
       - "CARGO_TERM_COLOR=always"
+      # mold links the 284 test binaries faster and with less memory than GNU ld.
+      - "RUSTFLAGS=-C link-arg=-fuse-ld=mold"
       - "CARGO_INCREMENTAL=0"
       - "RUST_BACKTRACE=short"
       - "CARGO_PROFILE_DEV_DEBUG=0"

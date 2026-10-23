@@ -21,10 +21,11 @@ FROM rust:1.99.1-bookworm
 #   libudev-dev     → mkit-sign-ctap (hidapi → libudev)
 #   libpcsclite-dev → mkit-keystore backend-yubikey (PC/SC)
 #   swtpm           → software-TPM integration tests (tpm-mssim feature)
-# unzip/jq support the protoc install below.
+# unzip/jq support the protoc install below. mold links the nextest archive
+# (cloudbuild/ci.yaml) faster and with less memory than GNU ld.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        libtss2-dev libudev-dev libpcsclite-dev pkg-config swtpm unzip jq \
+        libtss2-dev libudev-dev libpcsclite-dev pkg-config swtpm unzip jq mold \
     && rm -rf /var/lib/apt/lists/*
 
 # protoc — buffa-build / connectrpc-build shell out to it during codegen. The
