@@ -1415,61 +1415,13 @@ over `rust/tests/golden/pack-v2/`, the `pack-ruzstd`-only nextest run in
 `just ci`, and `scripts/wasm-ruzstd-check.sh` (the same fixtures decoded
 on a real wasm32 target by `mkit-core-wasm-check`, in `just ci-scripts`).
 
-## Hosted workspaces separate public projects from owner execution
+## Browser identity and signing authority have separate lifetimes
 
-**Always:** workspace files and signed versions are public; conversation messages,
-current task details, and PTY access require the owner's session. Writes require
-an exact, unexpired auth-v2 signature. The browser uses a saved PRF passkey identity;
-its signing seed never leaves the browser. The server holds a separate agent key
-whose owner-signed grant must remain valid for new execution and version publication.
+**Always:** one shared AuthProvider and Account region represent the browser's identity on every page, and the identity lives only in that browser. A refresh preserves public recovery metadata (passkey credential id, public keys, petname) but cannot recover or persist a signing seed. Locking signing preserves the remembered identity; sign-out forgets it, wipes the in-memory seed, and keeps only the passkey credential id so the same passkey can sign in again. Lock and sign-out propagate to other tabs, and a passkey ceremony that was in flight when either happens fails instead of unlocking. A passkey that derives a different public key than the remembered identity is rejected until the user signs out.
 
-**Because:** public remixing must not disclose private prompts or give visitors
-shell access under another person's delegated identity.
+**Because:** page navigation and cache reuse must not change identity or revive signing authority after sign-out. Public recovery metadata is safe to persist; signing keys are not.
 
-**If violated:** a public link can leak conversations or execute commands without
-owner authorization; replaying a request can affect an unrelated later task.
-
-**Enforced by:** `apps/workspace-worker/src/auth.test.ts` and
-`apps/workspace-worker/src/workspace.integration.test.ts`.
-
-## Hosted task completion publishes a recoverable signed version
-
-**Always:** only a completed, currently authorized agent task publishes its new
-signed version with its completed status and saved conversation snapshot. Failed
-or cancelled tasks retain captured draft files without claiming completion.
-Captures cannot overwrite another workspace generation. A worker restart does
-not replay shell commands whose outcome is uncertain.
-
-**Because:** the browser can close while the agent works, and container lifetime
-is independent of the project's durable files and versions.
-
-**If violated:** users lose completed work, see a completed task with no version,
-or execute a command twice during recovery.
-
-**Enforced by:** `apps/workspace-worker/src/workspace-state.test.ts` and
-`apps/workspace-worker/src/sandbox-files.test.ts`.
-
-## Browser login and signing authority have separate lifetimes
-
-**Always:** one shared session query and Account region represent login on every page. A refresh can preserve the HttpOnly login cookie, but cannot recover or persist a signing seed. Locking signing preserves the login; sign-out revokes the server session and clears private query and mutation caches. Workspace reads remain disabled during logout, and late responses cannot replace another identity's state. Workspace activation never issues a login cookie.
-
-**Because:** page navigation and cache reuse must not change identity or revive access after sign-out. Public recovery metadata is safe to persist; signing keys and private workspace state are not.
-
-**Enforced by:** `apps/web/src/components/auth-provider.test.tsx`, `apps/workspace-worker/src/browser-session.test.ts`, workspace integration tests, and `bun run verify:auth` in `apps/web`.
-
-## A workspace version saves one coherent project state
-
-**Always:** a batch save checks every draft's expected file hash before publishing any edit or version. A conflict preserves browser edits and requires explicit review against current content. Terminal working changes and accepted drafts become one named version. Restore appends a new version and retains saved history.
-
-**Because:** a project version must not silently combine stale edits or leave half a batch applied.
-
-**Enforced by:** workspace worker version-edit integration tests, file-editor conflict tests, and workspace save orchestration tests.
-
-## Browser drafts belong to the authenticated session
-
-**Always:** drafts stay in memory, survive route remounts and signing locks, and clear on logout or session replacement. Explicit logout asks before discarding drafts. Current file query keys include content hashes so terminal captures cannot leave cached contents stale.
-
-**Enforced by:** workspace draft-store, Account, auth-provider, and workspace query tests.
+**Enforced by:** `apps/web/src/components/auth-provider.test.tsx`, `apps/web/src/lib/identity-store.test.ts`, and `bun run verify:auth` in `apps/web`.
 
 ## BMT inclusion-proof bytes and sibling selection match commonware exactly
 

@@ -9,15 +9,14 @@ import { UnlockedHeader } from './multiplayer/identity-panel'
 import { OwnPlayerName, PlayerAvatar, PlayerLabel } from './multiplayer/player-label'
 import { useMkit } from './use-mkit'
 
-/** The shared account surface; login survives refresh, signing authority does not. */
+/** The shared account surface; the remembered identity survives refresh, signing authority does not. */
 export function Account() {
   const auth = useAuth()
   const [open, setOpen] = useState(false)
   const [proofOpen, setProofOpen] = useState(false)
-  const publicKey = auth.session?.publicKey ?? ''
+  const publicKey = auth.publicKey ?? ''
   const signingUnlocked = !!publicKey && auth.unlocked
-  const state =
-    auth.session === undefined ? (auth.pending ? 'loading' : 'error') : publicKey ? 'signed-in' : 'signed-out'
+  const state = auth.pending ? 'loading' : publicKey ? 'signed-in' : 'signed-out'
   const disabled = auth.busy || auth.pending
 
   return (
@@ -109,9 +108,7 @@ export function Account() {
               ) : (
                 <>
                   <p className='w-full text-muted'>
-                    {state === 'error'
-                      ? 'Could not load your account. Try again.'
-                      : 'Sign in with a passkey to use mkit. New to mkit? Create a passkey first.'}
+                    Sign in with a passkey to use mkit. New to mkit? Create a passkey first.
                   </p>
                   <button
                     className={`btn ${auth.hasPasskey ? 'btn--outlined' : 'btn--solid'} btn--small`}

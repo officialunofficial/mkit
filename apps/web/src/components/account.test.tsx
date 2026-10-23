@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { Account } from './account'
 
 const auth = vi.hoisted(() => ({
-  session: undefined as undefined | null | { id: string; publicKey: string; expiresAt: number },
+  publicKey: null as string | null,
   pending: true,
   busy: false,
   status: null as string | null,
@@ -25,17 +25,17 @@ vi.mock('./multiplayer/player-label', () => ({
 }))
 
 beforeEach(() => {
-  Object.assign(auth, { session: undefined, pending: true, busy: false, status: null, unlocked: false })
+  Object.assign(auth, { publicKey: null, pending: true, busy: false, status: null, unlocked: false })
   vi.clearAllMocks()
 })
 afterEach(cleanup)
 
-it('waits for session restoration before offering account creation', async () => {
+it('waits for the remembered identity to load before offering account creation', async () => {
   const view = render(<Account />)
   expect(screen.getByRole('region', { name: 'Account' })).toHaveAttribute('data-auth-status', 'loading')
   expect(screen.queryByRole('button', { name: 'Create passkey identity' })).not.toBeInTheDocument()
   auth.pending = false
-  auth.session = null
+  auth.publicKey = null
   view.rerender(<Account />)
   expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled()
   expect(screen.queryByRole('button', { name: 'Create a passkey' })).not.toBeInTheDocument()
@@ -45,13 +45,13 @@ it('waits for session restoration before offering account creation', async () =>
 
 it('remembers the signed-in player while signing is locked and delegates explicit unlock', async () => {
   auth.pending = false
-  auth.session = { id: 'session', publicKey: 'ab'.repeat(32), expiresAt: Date.now() + 1000 }
+  auth.publicKey = 'ab'.repeat(32)
   render(<Account />)
   await userEvent.click(screen.getByRole('button', { name: 'Account' }))
   const account = screen.getByRole('region', { name: 'Account' })
   expect(account).toHaveAttribute('data-auth-status', 'signed-in')
   expect(account).toHaveAttribute('data-signing-status', 'locked')
-  expect(account).toHaveAttribute('data-public-key', auth.session.publicKey)
+  expect(account).toHaveAttribute('data-public-key', auth.publicKey)
   expect(screen.getByText('Remembered player')).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: 'Create passkey identity' })).not.toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: 'Unlock signing' }))
@@ -60,7 +60,7 @@ it('remembers the signed-in player while signing is locked and delegates explici
 
 it('keeps lock-signing and sign-out as distinct shared actions', async () => {
   auth.pending = false
-  auth.session = { id: 'session', publicKey: 'ab'.repeat(32), expiresAt: Date.now() + 1000 }
+  auth.publicKey = 'ab'.repeat(32)
   auth.unlocked = true
   render(<Account />)
   await userEvent.click(screen.getByRole('button', { name: 'Account' }))

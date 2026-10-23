@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Remove the hosted-workspace Cloudflare Worker (`apps/workspace-worker`) and
+  its CI, Dependabot and documentation entries. The website no longer has a
+  server session: the passkey identity (create, unlock, lock signing, sign out,
+  cross-tab sync) is kept entirely in the browser, and sign-out now forgets the
+  remembered identity locally while keeping the passkey credential for the next
+  sign-in. No Rust, wire or stored-format change.
+
 - Raise the pinned Rust toolchain and MSRV from 1.95.0 to 1.99.1 across the
   workspace, `contrib/signers`, the worker crates, CI workflows, the CI image
   and docs. Adopt the new `Atomic::try_update` name, `bit_width`, and
