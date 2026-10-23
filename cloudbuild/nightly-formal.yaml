@@ -1,0 +1,99 @@
+# Nightly formal verification on Cloud Build. Ports .github/workflows/formal.yml.
+# Every step calls a `just formal-*` recipe, so the justfile stays the single
+# source of what runs. One step runs the layers in sequence on one VM. Kani
+# and Quint are the long ones.
+#
+# Tool pins live in cloudbuild/Dockerfile.nightly and the justfile.
+# A green run is not a proof unless docs/FORMAL.md lists the result as proved.
+#
+# The old `apalache` job had continue-on-error. Here `_APALACHE_BLOCKING`
+# controls that: "false" (default) logs the failure and keeps the build green.
+#
+# Trigger: mkit-nightly-formal (manual-event trigger).
+# Cloud Scheduler: '0 5 * * *' UTC.
+# Run one layer only: --substitutions=_LAYERS="conformance lean"
+
+substitutions:
+  _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache
+  _NIGHTLY_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci-nightly:rust-1.99.1
+  # Space-separated subset of: quint apalache lean kani conformance.
+  _LAYERS: "quint apalache lean kani conformance"
+  _APALACHE_BLOCKING: "false"
+  # Restricts Kani harnesses by name regex (empty means all).
+  _KANI_FILTER: ""
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 200
+  dynamicSubstitutions: true
+# quint ~50+ min, apalache up to 300 min, kani ~1.5 h. Layers run in sequence.
+timeout: 36000s
+
+steps:
+  - name: ${_NIGHTLY_IMAGE}
+    id: formal
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=nightly-formal"
+      - "LAYERS=${_LAYERS}"
+      - "APALACHE_BLOCKING=${_APALACHE_BLOCKING}"
+      - "KANI_FILTER=${_KANI_FILTER}"
+    args:
+      - -c
+      - |
+        set -uo pipefail
+        # Run every layer even after a failure, then report. Cloud Build has
+        # no matrix, so one step loops over the layers.
+        failed=()
+        has() { grep -qw -- "$$1" <<<"$$LAYERS"; }
+
+        # TLC is the tlc2.TLC class in the Apalache jar, so quint needs it.
+        if has quint || has apalache; then
+          just formal-setup-apalache || { echo "apalache setup failed"; exit 1; }
+        fi
+
+        if has quint; then
+          echo "##### quint + TLC (check.sh default mode, plus gc TLC=1)"
+          just formal-quint all || failed+=(quint)
+          echo "##### MKIT-22 fixtures reproduce from the model"
+          just formal-fixtures || failed+=(quint-fixtures)
+        fi
+
+        if has apalache; then
+          echo "##### apalache (APALACHE=1, bounded)"
+          if ! just formal-apalache; then
+            if [ "$$APALACHE_BLOCKING" = "true" ]; then
+              failed+=(apalache)
+            else
+              echo "apalache FAILED (non-blocking, as in the old workflow)"
+            fi
+          fi
+        fi
+
+        if has lean; then
+          echo "##### lean (proofs + difftests)"
+          just formal-lean || failed+=(lean)
+        fi
+
+        if has kani; then
+          echo "##### kani (all harnesses)"
+          just formal-kani || failed+=(kani)
+        fi
+
+        if has conformance; then
+          echo "##### conformance (MKIT-22 ITF replay)"
+          just formal-conformance || failed+=(conformance)
+        fi
+
+        sccache --show-stats || true
+        if [ "$${#failed[@]}" -gt 0 ]; then
+          echo "failed layers: $${failed[*]}"
+          exit 1
+        fi
+        echo "all requested layers passed"

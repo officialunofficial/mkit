@@ -1,0 +1,117 @@
+# MCP docs corpus seed on Cloud Build. Ports .github/workflows/mcp-release.yml.
+#
+# Trigger: mkit-mcp-release — tag pattern ^v[0-9]+\.[0-9]+\.[0-9]+$ (the same
+# release tag as publish-crates). Cloud Build checks out the tag's tree, so
+# the indexed tree is the released source.
+#
+# Nothing here is GitHub-specific. The GitHub `environment: mcp` approval gate
+# has no Cloud Build equivalent. Control who can push a v* tag instead.
+#
+# DRY RUN. _DRY_RUN=true runs the typecheck, tests, index build and version
+# guard. It then migrates and seeds a LOCAL D1 inside the build container.
+# It makes no Cloudflare call and reads no secret value:
+#   gcloud builds submit . --region=us-east4 \
+#     --config=cloudbuild/mcp-release.yaml --substitutions=_DRY_RUN=true
+#
+# SECRET: cloudflare-api-token -> CLOUDFLARE_API_TOKEN (Secret Manager).
+# CLOUDFLARE_ACCOUNT_ID is not secret. Set _CF_ACCOUNT_ID on the trigger.
+# _FORCE=true re-seeds an already-indexed version.
+#
+# CONCURRENCY. No built-in lock. Keep one trigger. Seeding is skip-if-indexed.
+
+substitutions:
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.99.1
+  _DRY_RUN: "false"
+  _FORCE: "false"
+  _CF_ACCOUNT_ID: ""
+  _TAG: ""
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/${PROJECT_ID}/secrets/cloudflare-api-token/versions/latest
+      env: CLOUDFLARE_API_TOKEN
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+  dynamicSubstitutions: true
+  substitution_option: ALLOW_LOOSE
+
+timeout: 1800s
+
+steps:
+  - name: ${_CI_IMAGE}
+    id: build-and-check
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        dry="${_DRY_RUN}"
+        tag="${TAG_NAME}"
+        if [[ -z "$$tag" && "$$dry" == "true" ]]; then tag="${_TAG}"; fi
+        if [[ -n "$$tag" && ! "$$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then
+          echo "ERROR: tag '$$tag' is not a vX.Y.Z release tag" >&2
+          exit 1
+        fi
+        if [[ -z "$$tag" && "$$dry" != "true" ]]; then
+          echo "ERROR: no TAG_NAME. A real seed must run from the tag trigger." >&2
+          exit 1
+        fi
+        if [[ -d apps/mcp ]]; then dir=apps/mcp
+        elif [[ -d mcp ]]; then dir=mcp
+        else echo "ERROR: no MCP app directory" >&2; exit 1; fi
+        cd "$$dir"
+        npm ci
+        # Never seed from a tree whose indexer fails.
+        npm run ci
+        npm run index
+        indexed="$$(jq -r .version dist/manifest.json)"
+        if [[ -z "$$tag" ]]; then
+          echo "dry run without a tag: would check indexed '$$indexed' == tag"
+        elif [[ "$$indexed" != "$$tag" ]]; then
+          echo "ERROR: workspace version '$$indexed' != tag '$$tag'. Refusing to seed a mislabeled corpus." >&2
+          exit 1
+        else
+          echo "version check ok: $$indexed"
+        fi
+        echo "$$dir" > /workspace/.mcp-dir
+        echo "$$indexed" > /workspace/.mcp-version
+
+  # Real run: check D1, then migrate and seed. Dry run: local D1 only.
+  - name: ${_CI_IMAGE}
+    id: seed
+    entrypoint: bash
+    secretEnv: ["CLOUDFLARE_API_TOKEN"]
+    env:
+      - "CLOUDFLARE_ACCOUNT_ID=${_CF_ACCOUNT_ID}"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd "$$(cat /workspace/.mcp-dir)"
+        version="$$(cat /workspace/.mcp-version)"
+        if [[ "${_DRY_RUN}" == "true" ]]; then
+          echo "DRY RUN: migrate and seed a LOCAL D1 only"
+          npm run db:migrate:local
+          npm run db:seed:local
+          exit 0
+        fi
+        if [[ -z "$$(printenv CLOUDFLARE_API_TOKEN || true)" || -z "$$CLOUDFLARE_ACCOUNT_ID" ]]; then
+          echo "ERROR: Cloudflare token or _CF_ACCOUNT_ID is empty" >&2
+          exit 1
+        fi
+        raw="$$(npx --yes wrangler d1 execute mkit-mcp-search --remote --json \
+          --command "SELECT version FROM versions WHERE version = '$$version'" 2>wrangler.err)" \
+          || { cat wrangler.err >&2; echo "ERROR: wrangler d1 execute failed" >&2; exit 1; }
+        count="$$(printf '%s' "$$raw" | jq -s '[.. | objects | .results? // empty] | add // [] | length')"
+        if [[ ! "$$count" =~ ^[0-9]+$$ ]]; then
+          echo "ERROR: cannot determine indexed state for $$version (got '$$count')" >&2
+          exit 1
+        fi
+        if [[ "$$count" != "0" && "${_FORCE}" != "true" ]]; then
+          echo "$$version already indexed. Corpus untouched. Use _FORCE=true to re-seed."
+          exit 0
+        fi
+        npm run db:migrate
+        npm run db:seed

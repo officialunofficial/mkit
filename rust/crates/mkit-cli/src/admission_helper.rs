@@ -358,7 +358,7 @@ mod tests {
                 .to_string()
                 .contains("128 KiB")
         );
-        let (_dir, timeout) = script("sleep 5 & exit 0");
+        let (_dir, timeout) = script("sleep 5 2>/dev/null & exit 0");
         let start = Instant::now();
         assert!(
             timeout

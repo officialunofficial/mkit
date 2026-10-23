@@ -11,10 +11,10 @@
 #   3. Codecov token         (optional — Secret Manager, for coverage upload)
 #   4. Build triggers        (the /gcbrun-gated Rust suite + path-gated gates)
 #
-# SCOPE: CI only. mkit ships a CLI binary + Cloudflare Workers, so there is no
-# image-publish / GKE-deploy half. Release/crates.io/npm/
-# cosign stay on GitHub Actions; the macOS + keystore-backends legs (which Cloud
-# Build's Linux containers can't run) also stay on GitHub Actions.
+# SCOPE: CI, scheduled jobs and tag-driven crate publishing. mkit has no GKE
+# deploy half. The GitHub binaries, cosign, SLSA, npm Trusted Publishing and
+# release-plz stay on GitHub Actions, as do the macOS legs (native.yml) that
+# Cloud Build's Linux containers can't run.
 #
 # Idempotent: existing buckets/secrets/triggers are detected and skipped, so it
 # is safe to re-run. Requires gcloud (authed). Run from the repo root.
@@ -111,7 +111,7 @@ mk_push mkit-ci-main --build-config=cloudbuild/ci.yaml \
 # output — protos, build.rs, the regen scripts, the committed generated/ trees,
 # AND the inputs that silently drive codegen: Cargo.lock (the buffa-build /
 # connectrpc-build crate versions) and Dockerfile.ci (the baked protoc version).
-CODEGEN_FILES='**/*.proto','**/build.rs','**/Cargo.lock','buf.yaml','cloudbuild/Dockerfile.ci','scripts/regen-rpc-proto.sh','scripts/regen-repo-proto.sh','scripts/regen-transport-proto.sh','scripts/regen-hooks-proto.sh','scripts/check-generated-fresh.sh','**/generated/**'
+CODEGEN_FILES='**/*.proto','**/build.rs','**/Cargo.lock','buf.yaml','cloudbuild/Dockerfile.ci','scripts/regen-rpc-proto.sh','scripts/regen-repo-proto.sh','scripts/regen-transport-proto.sh','scripts/regen-hooks-proto.sh','scripts/check-generated-fresh.sh','**/generated/**','**/buf.yaml','scripts/check-server-hooks-goldens.sh','rust/tests/golden/server-hooks/**'
 mk_pr   mkit-codegen-pr   --build-config=cloudbuild/codegen.yaml \
         --comment-control="$COL" --included-files="$CODEGEN_FILES"
 mk_push mkit-codegen-main --build-config=cloudbuild/codegen.yaml \
@@ -135,8 +135,101 @@ mk_push mkit-docs-main --build-config=cloudbuild/docs.yaml \
 mk_pr   mkit-geiger-pr   --build-config=cloudbuild/geiger.yaml --comment-control="$COL"
 mk_push mkit-geiger-main --build-config=cloudbuild/geiger.yaml
 
+# Darwin type-check (aarch64 + x86_64): path-gated to the macOS-specific code
+# and the dependency graph. The macOS runtime tests run nightly on GitHub.
+DARWIN_FILES='rust/Cargo.lock','rust/Cargo.toml','rust/rust-toolchain.toml','rust/crates/**','contrib/signers/**','cloudbuild/darwin.yaml','cloudbuild/Dockerfile.ci','scripts/zig-cc-darwin.sh'
+mk_pr   mkit-darwin-pr   --build-config=cloudbuild/darwin.yaml \
+        --comment-control="$COL" --included-files="$DARWIN_FILES"
+mk_push mkit-darwin-main --build-config=cloudbuild/darwin.yaml \
+        --included-files="$DARWIN_FILES"
+
+# Server shard (primitives, server clippy powerset, wire conformance, semver,
+# wasm client): path-gated to Rust and the server specs.
+SERVER_FILES='rust/**','scripts/**','docs/specs/SPEC-SERVER.md','docs/specs/SPEC-TRANSPORT-CONNECT.md','cloudbuild/server.yaml'
+mk_pr   mkit-server-pr   --build-config=cloudbuild/server.yaml \
+        --comment-control="$COL" --included-files="$SERVER_FILES"
+mk_push mkit-server-main --build-config=cloudbuild/server.yaml \
+        --included-files="$SERVER_FILES"
+
+# Supply files (third-party notices, release artifact feature check).
+SUPPLY_FILES='rust/Cargo.lock','rust/Cargo.toml','rust/crates/**/Cargo.toml','rust/about.toml','rust/about.hbs','rust/crates/mkit-cli/**','rust/rust-toolchain.toml','scripts/check-release-artifact-features.sh','scripts/release/**','.github/workflows/release.yml','cloudbuild/supply.yaml'
+mk_pr   mkit-supply-pr   --build-config=cloudbuild/supply.yaml \
+        --comment-control="$COL" --included-files="$SUPPLY_FILES"
+mk_push mkit-supply-main --build-config=cloudbuild/supply.yaml \
+        --included-files="$SUPPLY_FILES"
+
+# Meta checks (spec status, crypto stack version, actionlint, dependabot
+# coverage, no-windows-target).
+META_FILES='docs/specs/**','.github/workflows/**','.github/actions/**','.github/actionlint.yaml','.github/dependabot.yml','scripts/check-spec-status.sh','scripts/check-crypto-stack-version.sh','scripts/check-dependabot-coverage.sh','scripts/check-no-windows-target.sh','justfile','install.sh','rust/**/Cargo.toml','rust/**/Cargo.lock','contrib/**/Cargo.toml','contrib/signers/**/Cargo.lock','apps/*/Cargo.toml','apps/**/Cargo.lock','apps/web/package.json','apps/web/scripts/*.mjs','apps/web/.gitignore','cloudbuild/meta.yaml'
+mk_pr   mkit-meta-pr   --build-config=cloudbuild/meta.yaml \
+        --comment-control="$COL" --included-files="$META_FILES"
+mk_push mkit-meta-main --build-config=cloudbuild/meta.yaml \
+        --included-files="$META_FILES"
+
+# TypeScript apps (web, mcp, og, spammer-worker, workers): one build runs all
+# five in parallel, so the trigger uses the union of the old path filters.
+TS_FILES='apps/**','docs/**','SKILL.md','README.md','man/**','rust/Cargo.lock','rust/Cargo.toml','rust/rust-toolchain.toml','rust/vendor/ruzstd/**','rust/crates/mkit-attest/**','rust/crates/mkit-core/**','rust/crates/mkit-rpc/**','rust/crates/mkit-wasm/**','rust/crates/mkit-repo-client/**','scripts/patch-wasm-bundler-glue.mjs','scripts/check-generated-fresh-ts.sh','cloudbuild/ts.yaml'
+mk_pr   mkit-ts-pr   --build-config=cloudbuild/ts.yaml \
+        --comment-control="$COL" --included-files="$TS_FILES"
+mk_push mkit-ts-main --build-config=cloudbuild/ts.yaml \
+        --included-files="$TS_FILES"
+
 # Coverage: informational, main pushes only (does not gate PRs).
 mk_push mkit-coverage-main --build-config=cloudbuild/coverage.yaml
+
+# ── 5. Release triggers (opt in: ENABLE_RELEASE_TRIGGERS=1) ──────────────────
+# Tag-driven crate, primitives and MCP publishes. These run the SAME release
+# steps as the GitHub publish workflows, so enable them only when the matching
+# GitHub workflow (crates-publish.yml, primitives-publish.yml, mcp-release.yml)
+# is retired in the same change. Otherwise one tag publishes twice.
+# Needs secrets CARGO_REGISTRY_TOKEN's source (CRATES_PACKAGE_KEY),
+# cloudflare-api-token and BUF_TOKEN in Secret Manager (see docs/RELEASE.md).
+mk_tag() { local n="$1"; shift; mk "$n" "$@"; }
+if [ "${ENABLE_RELEASE_TRIGGERS:-0}" = "1" ]; then
+  echo "== release triggers =="
+  mk_tag mkit-publish-crates --tag-pattern='^v[0-9]+\.[0-9]+\.[0-9]+$' \
+         --build-config=cloudbuild/publish-crates.yaml
+  mk_tag mkit-mcp-release --tag-pattern='^v[0-9]+\.[0-9]+\.[0-9]+$' \
+         --build-config=cloudbuild/mcp-release.yaml \
+         --substitutions="_CF_ACCOUNT_ID=${CF_ACCOUNT_ID:?set CF_ACCOUNT_ID}"
+  mk_tag mkit-publish-primitives \
+         --tag-pattern='^mkit-primitives-v[0-9]+\.[0-9]+\.[0-9]+$' \
+         --build-config=cloudbuild/publish-primitives.yaml \
+         --substitutions="_GPG_FINGERPRINTS=${GPG_FINGERPRINTS:?set GPG_FINGERPRINTS}"
+fi
+
+# ── 6. Scheduled triggers (opt in: ENABLE_SCHEDULED_TRIGGERS=1) ──────────────
+# A manual trigger per config plus a Cloud Scheduler job that runs it
+# (polychrome's pattern). Cron times match the retired GitHub schedules (UTC).
+mk_manual() {
+  local n="$1" cfg="$2" cron="$3"; shift 3
+  mk "$n" --branch-pattern='^main$' --build-config="$cfg" "$@"
+  if gcloud scheduler jobs describe "$n" --project="$PROJECT" --location="$REGION" \
+       >/dev/null 2>&1; then
+    echo "  (scheduler job ${n} exists — skipping)"
+    return 0
+  fi
+  gcloud scheduler jobs create http "$n" --project="$PROJECT" --location="$REGION" \
+    --schedule="$cron" --time-zone=UTC --http-method=POST \
+    --uri="https://cloudbuild.googleapis.com/v1/projects/${PROJECT}/locations/${REGION}/triggers/${n}:run" \
+    --message-body='{"source":{"branchName":"main"}}' \
+    --oauth-service-account-email="$BUILD_SA"
+}
+if [ "${ENABLE_SCHEDULED_TRIGGERS:-0}" = "1" ]; then
+  echo "== scheduled triggers =="
+  mk_manual mkit-nightly-fuzz   cloudbuild/nightly-fuzz.yaml   '0 4 * * *'
+  mk_manual mkit-nightly-formal cloudbuild/nightly-formal.yaml '0 5 * * *'
+  mk_manual mkit-nightly-bench  cloudbuild/nightly-bench.yaml  '0 7 * * 0'
+  mk_manual mkit-mutants-full   cloudbuild/mutants.yaml        '0 7 * * 2' \
+            --substitutions=_MODE=full
+  mk_manual mkit-security-weekly cloudbuild/security.yaml      '0 6 * * 1'
+  mk_manual mkit-commonware-latest cloudbuild/commonware-latest.yaml '23 5 * * 1'
+  mk_manual mkit-connect-latest cloudbuild/connect-latest.yaml '23 5 * * 1'
+fi
+# Pull-request mutation diff.
+mk_pr mkit-mutants-pr --build-config=cloudbuild/mutants.yaml \
+      --comment-control="$COL" --included-files='rust/**' \
+      --substitutions=_MODE=diff
 
 echo "Done. Triggers:"
 gcloud builds triggers list --project="$PROJECT" --region="$REGION" \

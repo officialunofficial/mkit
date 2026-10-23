@@ -1,0 +1,261 @@
+name: "CI: Native"
+
+# Platform legs that Cloud Build's Linux workers cannot run: the macOS
+# build/test leg and the keystore backend matrix (macOS Keychain and Linux
+# Secret Service). Cloud Build already type-checks the macOS code on every PR
+# (cloudbuild/darwin.yaml), so this workflow runs only to execute it.
+#
+# Cost note: macOS minutes bill at 10x. This workflow has NO pull_request
+# trigger. It runs in two cases:
+#   - push to main, only when a file in the macOS-specific surface changes
+#     (the paths filter below), and
+#   - nightly, to catch everything the filter skips.
+# Run it by hand with `gh workflow run native.yml --ref <branch>`.
+#
+# Nothing here is a required status check: the PR gate is Cloud Build.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/native.yml'
+      - '.github/actions/setup-rust/**'
+      - 'rust/Cargo.lock'
+      - 'rust/Cargo.toml'
+      - 'rust/rust-toolchain.toml'
+      - 'rust/crates/mkit-keystore/**'
+      - 'rust/crates/mkit-cli/**'
+      - 'rust/crates/mkit-core/src/batch.rs'
+      - 'contrib/signers/**'
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per ref. A newer push cancels an older push run. Scheduled and
+# manual runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.99.1"
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    # macOS leg. The Linux leg runs on Cloud Build (cloudbuild/ci.yaml).
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # Toolchain (rustfmt + clippy) + lockfile-keyed cargo cache. No protoc:
+      # mkit-rpc's build.rs stages pre-committed generated/ sources by default
+      # (protoc is only invoked in codegen mode, via MKIT_RPC_CODEGEN=1, which
+      # only scripts/regen-rpc-proto.sh sets) — the codegen-freshness check
+      # that needs that now lives on Cloud Build (cloudbuild/codegen.yaml),
+      # which gets protoc from its own Docker image, not from here.
+      # cache-prefix is partitioned per-workflow + per-runner so a malicious PR
+      # cannot poison a key a privileged workflow (release.yml) later reads —
+      # see .github/actions/setup-rust and docs/RELEASE.md.
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+          cache-prefix: "rust-ci-${{ matrix.os }}"
+          protoc: "false"
+
+      # cargo-nextest: faster + structured test runner. Replaces
+      # `cargo test`. Pinned via taiki-e/install-action which fetches a
+      # cosign-signed prebuilt binary from the cargo-nextest release.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        with:
+          tool: cargo-nextest
+
+      # macOS gates the native signer deps (libtss2/libudev/pcsclite) out via
+      # target_os, so no apt step is needed here — unlike the Linux leg (now on
+      # Cloud Build), where cloudbuild/Dockerfile.ci bakes them in.
+
+      - name: Check formatting
+        working-directory: rust
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: rust
+        run: |
+          python3 ../scripts/check-feature-names.py
+          cargo clippy --all-targets --all-features --workspace -- -D warnings
+
+      - name: Build
+        working-directory: rust
+        run: cargo build --locked --workspace
+
+      # The reference external signers are a SEPARATE workspace
+      # (contrib/signers/) so they don't break release-plz's crates.io publish
+      # (#225). `--workspace` above no longer covers them, so build/test/lint
+      # them here. This step must run BEFORE the workspace nextest step:
+      # mkit-cli's attest_roundtrip tests drive the mkit-sign-file binary from
+      # contrib/signers/target/debug/ and only fall back to building it
+      # on-the-fly when it's missing.
+      # No doctest pass here: the signers are bin-only crates and
+      # `cargo test --doc` hard-errors with "no library targets found"
+      # when a workspace has no lib targets (doctests only exist in libs).
+      - name: Contrib signers (separate workspace)
+        working-directory: contrib/signers
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo build --locked --all-features
+          cargo nextest run --locked --all-features
+
+      # #505 PR 2/5: macOS runners always have `git` on PATH, so tests that
+      # would otherwise silently `return` green when `git` is missing must
+      # fail loudly here instead. TPM (`tpm2` feature) and the real-ssh e2e
+      # suite are NOT provisioned on macOS runners, so MKIT_TEST_STRICT is
+      # deliberately left unset for the contrib/signers step below — those
+      # stay ordinary (quiet, `#[ignore]`d) skips here.
+      - name: Test (nextest)
+        working-directory: rust
+        env:
+          MKIT_TEST_STRICT: "1"
+        run: cargo nextest run --locked --workspace --all-features
+
+      # The indexed verification suite again with one Extract step per slice
+      # (the default chains selection steps): every outcome assertion must
+      # hold in both modes.
+      - name: Test (nextest, indexed verification unchained)
+        working-directory: rust
+        env:
+          MKIT_TEST_EXTRACT_CHAIN: "1"
+        run: >-
+          cargo nextest run --locked -p mkit-server --all-features
+          -E 'test(~indexed::)'
+
+      # #505 PR 5/5: a handful of irreducibly-real tests (subprocess
+      # sleeps, real localhost TCP, the ~5s worktree-lock wait, a real
+      # `ssh` connect attempt to 127.0.0.1:22) were quarantined behind
+      # `#[ignore]` instead of determinized. The `ignored-lane` nextest
+      # profile (rust/.config/nextest.toml) is the single source of
+      # truth for which quarantined tests this serial lane runs and why
+      # — see that profile's comment for the full rationale (both this
+      # workflow and cloudbuild/ci.yaml invoke the same profile instead
+      # of duplicating the test-name filter inline).
+      - name: Test (nextest, ignored lane)
+        working-directory: rust
+        run: >-
+          cargo nextest run --locked --workspace --all-features
+          --profile ignored-lane --run-ignored ignored-only
+
+      - name: Fuzz unit tests
+        working-directory: rust
+        run: cargo test --manifest-path fuzz/Cargo.toml
+
+      # Doctests are not run by `cargo nextest`. Run them separately so
+      # docstring examples still get exercised.
+      - name: Doctests
+        working-directory: rust
+        run: cargo test --locked --doc --workspace
+
+      - name: Version contract
+        working-directory: rust
+        shell: bash
+        run: |
+          cargo build --release --locked -p mkit-cli
+          out=$(./target/release/mkit version)
+          expected="mkit $(awk -F\" '/^version/ {print $2; exit}' Cargo.toml)"
+          echo "stdout:   [$out]"
+          echo "expected: [$expected]"
+          if [ "$out" != "$expected" ]; then
+            echo "::error::mkit version contract violated — stdout is not exactly 'mkit <X.Y.Z>\\n'"
+            exit 1
+          fi
+
+      # Issue #156: build the CLI with the dedicated
+      # `enc-transport` cargo feature and run the encrypted-transport
+      # e2e test. The above `--all-features` test pass already covers
+      # this in aggregate; the dedicated invocation pins the feature
+      # gate so a future refactor can't silently break the
+      # opt-in-only build path.
+      - name: Encrypted-transport feature build
+        working-directory: rust
+        run: |
+          cargo build --locked -p mkit-cli --features enc-transport
+          cargo test --locked -p mkit-transport-enc --features tcp --no-fail-fast
+
+  keystore-backends:
+    name: Keystore backends (${{ matrix.name }})
+    # Runs the native keystore backends on macOS and Linux. Before a release,
+    # see docs/RELEASE.md for the checklist step that dispatches this workflow.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-keychain-yubikey
+            os: macos-latest
+            features: backend-macos-keychain backend-yubikey
+          - name: linux-secret-systemd-yubikey
+            os: ubuntu-latest
+            features: backend-linux-secret-service backend-systemd-creds backend-yubikey
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # Keystore backends never compile mkit-rpc, so protoc is skipped here.
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+          cache-prefix: "rust-keystore-${{ matrix.name }}"
+          protoc: "false"
+
+      - name: Install Linux keystore native deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring libpcsclite-dev pkg-config
+
+      - name: Test keystore backend feature set
+        working-directory: rust
+        shell: bash
+        env:
+          MKIT_RUN_NATIVE_KEYSTORE_TESTS: "1"
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            dbus-run-session -- bash -lc '
+              set -euo pipefail
+              eval "$(printf "mkit-ci\n" | gnome-keyring-daemon --unlock --components=secrets)"
+              cargo test --locked -p mkit-keystore --features "${{ matrix.features }}"
+              cargo test --locked -p mkit-keystore --features "${{ matrix.features }}" \
+                backend_linux_secret_service::tests::live_backend_create_open_list_export_delete_roundtrip -- --exact --ignored
+            '
+            sudo env \
+              "PATH=$PATH" \
+              "CARGO_HOME=$CARGO_HOME" \
+              "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+              "CARGO_TARGET_DIR=$RUNNER_TEMP/mkit-systemd-creds-target" \
+              "MKIT_RUN_NATIVE_KEYSTORE_TESTS=1" \
+              "MKIT_RUN_SYSTEMD_CREDS_TESTS=1" \
+            cargo test --locked -p mkit-keystore --features "backend-systemd-creds" \
+                backend_systemd_creds::tests::live_backend_create_open_list_export_delete_roundtrip -- --exact --ignored
+          else
+            cargo test --locked -p mkit-keystore --features "${{ matrix.features }}"
+            cargo test --locked -p mkit-keystore --features "${{ matrix.features }}" -- --ignored
+          fi
+
+      - name: Clippy keystore backend feature set
+        working-directory: rust
+        shell: bash
+        run: cargo clippy --locked -p mkit-keystore --features "${{ matrix.features }}" --all-targets -- -D warnings

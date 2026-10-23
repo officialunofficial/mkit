@@ -127,12 +127,12 @@ Run top to bottom. Do not skip steps.
       `keyserver.ubuntu.com` so the workflow can import it before
       `git verify-tag`.
 - [ ] `SECURITY.md` disclosure contact confirmed reachable.
-- [ ] Manually dispatch `rust.yml`'s `keystore-backends` job
-      (`gh workflow run rust.yml --ref main`) and confirm both legs
+- [ ] Confirm the latest `native.yml` run on `main` succeeded. If a
+      keystore or macOS change merged since the last run, dispatch it
+      (`gh workflow run native.yml --ref main`). Both keystore legs
       (Linux Secret Service+systemd-creds+YubiKey, macOS Keychain+YubiKey)
-      succeed. It stays `workflow_dispatch`-only (2-OS matrix cost) and is
-      not exercised by any automatic trigger, so this is the only
-      per-release check that native keystore backends still work.
+      must pass. This is the only per-release check that native keystore
+      backends still work.
 
 ### Wait for the release workflows
 
@@ -222,7 +222,7 @@ the publish gate checks the server too, including that pinned baseline.
 - [ ] Verify the release-prep PR left a fresh `## [Unreleased]` heading at
       the top of `CHANGELOG.md`.
 - [ ] After 0.6.0 is tagged, restore the `server-semver` job in
-      `.github/workflows/rust.yml` to `--release-type patch` against the
+      `cloudbuild/server.yaml` to `--release-type patch` against the
       0.6.0 baseline (it checks the 0.6 release class against 0.5.0 until then).
 - [ ] After a crate's first publish, add co-owners:
       `cargo owner --add github:officialunofficial:makechain <crate>`, then

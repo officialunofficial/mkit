@@ -145,7 +145,7 @@ steps:
   - name: ${_CI_IMAGE}
     id: check
     waitFor: [primitives]
-    timeout: 3600s
+    timeout: 5400s
     entrypoint: bash
     env:
       - "CARGO_TERM_COLOR=always"

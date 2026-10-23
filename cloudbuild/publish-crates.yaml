@@ -1,0 +1,311 @@
+# crates.io + BSR release publish on Cloud Build. Ports
+# .github/workflows/crates-publish.yml (both jobs).
+#
+# Trigger: mkit-publish-crates — ONE tag trigger, pattern
+# ^v[0-9]+\.[0-9]+\.[0-9]+$ . Cloud Build checks out the tag's tree.
+#
+# Steps, in order. Every step before "publish" is a check.
+#   1. validate-tag      tag has the vX.Y.Z shape
+#   2. guard-version     tag == mkit-core version
+#   3. semver-gate       public API vs crates.io (cargo-semver-checks)
+#   4. publish-decoder   bounded decoder (scripts/publish-bounded-decoder.py)
+#   5. publish-workspace cargo publish --workspace --exclude mkit-primitives
+#   6. buf               BSR push. Dormant unless _BUF_PUBLISH_ENABLED=true.
+#
+# DRY RUN. _DRY_RUN=true makes every publish step use `--dry-run`. The run
+# uploads nothing and never reads a secret value. Use it to prove the pipeline:
+#   gcloud builds submit . --region=us-east4 \
+#     --config=cloudbuild/publish-crates.yaml --substitutions=_DRY_RUN=true
+# A manual submit has no tag, so the guard compares the working-tree version
+# with itself (it prints the check it would run on a real tag).
+# NOTE: cargo-semver-checks and `cargo publish --dry-run` still read crates.io.
+#
+# SECRETS (Secret Manager, read by the build service account):
+#   CRATES_PACKAGE_KEY -> CARGO_REGISTRY_TOKEN  (only the two publish steps)
+#   BUF_TOKEN          -> BUF_TOKEN             (only the buf step)
+# Earlier steps run build scripts, so they never get a token. Steps never echo
+# a token. The names are read with printenv, never with a brace-wrapped dollar
+# reference (dynamicSubstitutions rejects an unknown brace key at config time).
+#
+# CONCURRENCY. Cloud Build has no concurrency group. Keep ONE tag trigger and
+# do not start a manual run while a tag build runs. Two runs can race on the
+# crates.io index.
+#
+# RE-RUN AFTER A PARTIAL PUBLISH. Cargo errors on an already-published
+# version. If the workspace publish stopped half way, re-run with
+# _EXCLUDE set to a comma list of the crates that already landed:
+#   gcloud builds triggers run mkit-publish-crates --region=us-east4 \
+#     --tag=vX.Y.Z --substitutions=_EXCLUDE=mkit-core,mkit-rpc
+# `triggers run --tag` checks out the tag's tree and sets TAG_NAME.
+# The bounded decoder step is idempotent. It skips an identical published
+# version. Re-running the whole build after a transient failure is safe when
+# no workspace crate landed.
+#
+# _TAG exists for DRY-RUN manual submits only. A real publish needs the
+# trigger's TAG_NAME, because only the trigger checks out the tag's tree.
+
+substitutions:
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.99.1
+  _DRY_RUN: "false"
+  _BUF_PUBLISH_ENABLED: "false"
+  _EXCLUDE: ""
+  _TAG: ""
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/${PROJECT_ID}/secrets/CRATES_PACKAGE_KEY/versions/latest
+      env: CARGO_REGISTRY_TOKEN
+    - versionName: projects/${PROJECT_ID}/secrets/BUF_TOKEN/versions/latest
+      env: BUF_TOKEN
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+  diskSizeGb: 100
+  dynamicSubstitutions: true
+  # A manual submit has no TAG_NAME. Let it expand to empty.
+  substitution_option: ALLOW_LOOSE
+
+# cargo publish waits for each crate to index. Allow a long run.
+timeout: 5400s
+
+steps:
+  - name: ${_CI_IMAGE}
+    id: validate-tag
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        dry="${_DRY_RUN}"
+        tag="${TAG_NAME}"
+        if [[ -z "$$tag" && "$$dry" == "true" ]]; then
+          tag="${_TAG}"
+        fi
+        if [[ -z "$$tag" ]]; then
+          if [[ "$$dry" == "true" ]]; then
+            echo "dry run without a tag: shape check skipped"
+            exit 0
+          fi
+          echo "ERROR: no TAG_NAME. A real publish must run from the tag trigger." >&2
+          exit 1
+        fi
+        if [[ ! "$$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then
+          echo "ERROR: tag '$$tag' is not a vX.Y.Z release tag" >&2
+          exit 1
+        fi
+        echo "tag shape ok: $$tag"
+
+  - name: ${_CI_IMAGE}
+    id: guard-version
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        dry="${_DRY_RUN}"
+        tag="${TAG_NAME}"
+        if [[ -z "$$tag" && "$$dry" == "true" ]]; then
+          tag="${_TAG}"
+        fi
+        cd rust
+        ws="$(cargo metadata --no-deps --format-version 1 \
+          | jq -r '.packages[] | select(.name == "mkit-core") | .version')"
+        echo "workspace version (mkit-core): v$$ws"
+        if [[ -z "$$tag" && "$$dry" == "true" ]]; then
+          echo "dry run without a tag: would check tag == v$$ws"
+          exit 0
+        fi
+        if [[ "v$$ws" != "$$tag" ]]; then
+          echo "ERROR: workspace version 'v$$ws' != tag '$$tag'. Refusing to publish a mislabeled release." >&2
+          exit 1
+        fi
+        echo "version check ok: v$$ws"
+
+  # Same gate as crates-publish.yml. cargo-semver-checks is in the image.
+  - name: ${_CI_IMAGE}
+    id: semver-gate
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        # A crate with no crates.io entry has no baseline. cargo-semver-checks
+        # errors on it ("not found in registry") when named with -p, so a new
+        # crate (mkit-client at this writing) would fail the gate. The GitHub
+        # job had the same gap. Check only crates that are already published.
+        pkgs=()
+        for c in mkit-core mkit-server mkit-attest mkit-keystore mkit-rpc \
+          mkit-client mkit-sync mkit-transport-file mkit-transport-http \
+          mkit-transport-memory mkit-transport-s3 mkit-transport-enc \
+          mkit-transport-ssh mkit-transport-connect mkit-git-bridge; do
+          code="$$(curl -s -o /dev/null -w '%{http_code}' -A 'mkit-release (semver gate)' \
+            "https://crates.io/api/v1/crates/$$c")"
+          if [[ "$$code" == "200" ]]; then
+            pkgs+=(-p "$$c")
+          elif [[ "$$code" == "404" ]]; then
+            echo "$$c is not on crates.io yet: no semver baseline, skipped"
+          else
+            echo "ERROR: crates.io answered $$code for $$c" >&2
+            exit 1
+          fi
+        done
+        # DRY RUN on main: the tree still carries the old version while the
+        # API moved on, so an under-bump is expected. A manual dry run reports
+        # the result but does not fail. A real tag run is strict.
+        rc=0
+        cargo semver-checks --all-features "$${pkgs[@]}" || rc=$$?
+        cargo semver-checks -p mkit-server --all-features --baseline-version 0.5.0 || rc=$$?
+        if [[ "$$rc" != 0 ]]; then
+          if [[ "${_DRY_RUN}" == "true" ]]; then
+            echo "DRY RUN: semver gate WOULD FAIL (rc=$$rc). Not fatal in a dry run."
+          else
+            exit "$$rc"
+          fi
+        fi
+
+  # The bounded decoder is a standalone fork outside the workspace.
+  # Real run: the idempotent script (publish if absent, skip if identical).
+  # Dry run: package and dry-run publish the fork. No registry read of a token.
+  - name: ${_CI_IMAGE}
+    id: publish-decoder
+    entrypoint: bash
+    secretEnv: ["CARGO_REGISTRY_TOKEN"]
+    env:
+      - "CARGO_TERM_COLOR=always"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        if [[ "${_DRY_RUN}" == "true" ]]; then
+          echo "DRY RUN: cargo publish --dry-run for the bounded decoder"
+          cargo publish --manifest-path vendor/ruzstd/Cargo.toml --locked --dry-run
+          exit 0
+        fi
+        python3 ../scripts/publish-bounded-decoder.py
+
+  - name: ${_CI_IMAGE}
+    id: publish-workspace
+    entrypoint: bash
+    secretEnv: ["CARGO_REGISTRY_TOKEN"]
+    env:
+      - "CARGO_TERM_COLOR=always"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        args=(publish --workspace --exclude mkit-primitives --locked)
+        # _EXCLUDE: comma list of crates already published (partial re-run).
+        excl="${_EXCLUDE}"
+        if [[ -n "$$excl" ]]; then
+          for c in $$(echo "$$excl" | tr ',' ' '); do
+            args+=(--exclude "$$c")
+          done
+        fi
+        if [[ "${_DRY_RUN}" == "true" ]]; then
+          # BOUNDED ALTERNATIVE. A dry run never uploads the bounded decoder.
+          # Until that fork version is live, cargo cannot resolve mkit-ruzstd
+          # for mkit-core ("no matching package named mkit-ruzstd"). Then only
+          # list the package contents. A real run publishes the decoder first.
+          rz="$$(sed -n 's/^version *= *"\(.*\)"/\1/p' vendor/ruzstd/Cargo.toml | head -1)"
+          code="$$(curl -s -o /dev/null -w '%{http_code}' -A 'mkit-release (dry run)' \
+            "https://crates.io/api/v1/crates/mkit-ruzstd/$$rz")"
+          if [[ "$$code" != "200" ]]; then
+            echo "DRY RUN (bounded): mkit-ruzstd $$rz is not on crates.io; listing package contents only"
+            cargo package --workspace --exclude mkit-primitives --locked --list --allow-dirty \
+              | grep -c . | sed 's/^/packaged file lines: /'
+            exit 0
+          fi
+          args+=(--dry-run)
+          echo "DRY RUN: cargo $${args[*]}"
+        fi
+        cargo "$${args[@]}"
+
+  # Dormant by default. Set _BUF_PUBLISH_ENABLED=true on the trigger to push.
+  # A dry run always runs the offline checks and never pushes or logs in.
+  - name: ${_CI_IMAGE}
+    id: buf
+    entrypoint: bash
+    secretEnv: ["BUF_TOKEN"]
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        dry="${_DRY_RUN}"
+        if [[ "${_BUF_PUBLISH_ENABLED}" != "true" && "$$dry" != "true" ]]; then
+          echo "buf push is dormant (_BUF_PUBLISH_ENABLED != true): skipped"
+          exit 0
+        fi
+        tag="${TAG_NAME}"
+        if [[ -z "$$tag" ]]; then tag="${_TAG}"; fi
+        buf --version | grep -q '^1\.66\.0$' \
+          || { echo "ERROR: image buf is not 1.66.0" >&2; exit 1; }
+
+        # Offline checks, same as the GitHub job's lint step.
+        buf lint .
+
+        if [[ "$$dry" == "true" ]]; then
+          echo "DRY RUN: skip BSR login, BSR breaking check and buf push"
+          buf build .
+          # Local stand-in for the smoke test: generate from local files.
+          mkdir -p /tmp/bsr-smoke/mkit-repo
+          # The workspace is the input so imports of the sibling common module
+          # resolve. All three modules generate.
+          buf generate . \
+            --template apps/repo-worker/proto/buf.gen.yaml \
+            -o /tmp/bsr-smoke/mkit-repo
+          cd /tmp/bsr-smoke/mkit-repo
+          npm init -y >/dev/null
+          npm install --no-save typescript@5 @bufbuild/protobuf@2 >/dev/null
+          mapfile -t files < <(find gen/ts -name '*.ts')
+          npx tsc --noEmit --strict --module nodenext --moduleResolution nodenext \
+            --target es2022 "$${files[@]}"
+          echo "generated mkit-repo TypeScript typechecks cleanly"
+          exit 0
+        fi
+
+        if [[ -z "$$tag" ]]; then
+          echo "ERROR: no TAG_NAME for the BSR label" >&2
+          exit 1
+        fi
+        # buf reads BUF_TOKEN from the environment. Never print it.
+        if [[ -z "$$(printenv BUF_TOKEN || true)" ]]; then
+          echo "ERROR: BUF_TOKEN is empty" >&2
+          exit 1
+        fi
+
+        for spec in \
+          "rust/crates/mkit-rpc/proto buf.build/officialunofficial/mkit-rpc" \
+          "apps/repo-worker/proto buf.build/officialunofficial/mkit-repo"; do
+          set -- $$spec
+          if out="$$(buf breaking "$$1" --against "$$2" 2>&1)"; then
+            echo "$$out"
+          else
+            echo "$$out"
+            if grep -q 'was not found' <<<"$$out"; then
+              echo "$$2 has no prior state: first push, skipping breaking check"
+            else
+              echo "ERROR: breaking change vs published $$2. Refusing to publish." >&2
+              exit 1
+            fi
+          fi
+        done
+
+        buf push . --exclude-unnamed --label "$$tag" --create --create-visibility private
+
+        mkdir -p /tmp/bsr-smoke/mkit-repo
+        buf generate "buf.build/officialunofficial/mkit-repo:$$tag" \
+          --template apps/repo-worker/proto/buf.gen.yaml \
+          -o /tmp/bsr-smoke/mkit-repo
+        cd /tmp/bsr-smoke/mkit-repo
+        npm init -y >/dev/null
+        npm install --no-save typescript@5 @bufbuild/protobuf@2 >/dev/null
+        mapfile -t files < <(find gen/ts -name '*.ts')
+        npx tsc --noEmit --strict --module nodenext --moduleResolution nodenext \
+          --target es2022 "$${files[@]}"
+        echo "generated mkit-repo TypeScript typechecks cleanly"

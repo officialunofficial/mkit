@@ -26,6 +26,6 @@ crates=(-p mkit-rpc -p mkit-transport-connect -p mkit-client -p mkit-repo-client
 features='mkit-rpc/transport,mkit-rpc/transport-messages,mkit-rpc/hooks'
 "${cargo_cmd[@]}" build --locked "${crates[@]}" --features "$features"
 "${cargo_cmd[@]}" nextest run --locked "${crates[@]}" --features "$features" -j 3
-# Mirror both mkit-client wasm builds in rust.yml.
+# Mirror both mkit-client wasm builds in cloudbuild/server.yaml.
 "${cargo_cmd[@]}" build --locked -p mkit-client --target wasm32-unknown-unknown
 "${cargo_cmd[@]}" build --locked -p mkit-client --no-default-features --target wasm32-unknown-unknown

@@ -1,0 +1,30 @@
+# Build and push the nightly tooling image (cloudbuild/Dockerfile.nightly).
+# Run by hand:
+#   gcloud builds submit . --region=us-east4 --config=cloudbuild/builder-nightly.yaml
+# Rebuild when Dockerfile.nightly or the base image changes.
+
+substitutions:
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.99.1
+  _NIGHTLY_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci-nightly:rust-1.99.1
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - cloudbuild/Dockerfile.nightly
+      - --build-arg
+      - BASE_IMAGE=${_CI_IMAGE}
+      - -t
+      - ${_NIGHTLY_IMAGE}
+      - cloudbuild
+
+images: ["${_NIGHTLY_IMAGE}"]
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 200
+  # Resolves ${PROJECT_ID} nested inside the substitution values.
+  dynamicSubstitutions: true
+timeout: 3600s

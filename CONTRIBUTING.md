@@ -65,7 +65,7 @@ The root [`justfile`](../justfile) mirrors the gates CI actually runs
 [`cloudbuild/security.yaml`](../cloudbuild/security.yaml),
 [`cloudbuild/docs.yaml`](../cloudbuild/docs.yaml),
 [`cloudbuild/geiger.yaml`](../cloudbuild/geiger.yaml), and
-[`rust.yml`](../.github/workflows/rust.yml)'s `build-and-test` job) so you
+[`native.yml`](../.github/workflows/native.yml)'s `build-and-test` job) so you
 can check whether a change would pass CI before pushing, instead of finding
 out from a red PR check. Install
 [`just`](https://github.com/casey/just#installation), then, from the repo
@@ -77,9 +77,9 @@ just --list        # see every ci-* target and what it mirrors
 ```
 
 Run an individual `ci-*` target (`just ci-linux`, `just ci-security`, ...)
-to check one gate in isolation. The `keystore-backends` matrix (native
+to check one gate in isolation. The `keystore-backends` matrix in `native.yml` (native
 macOS Keychain/Linux Secret Service backends) isn't mirrored here &mdash; it
-stays `workflow_dispatch`-only on GitHub Actions by design; see
+runs nightly and on demand on GitHub Actions; see
 `docs/RELEASE.md`'s pre-release checklist. Windows is not a supported
 target (MKIT-6; see `docs/INVARIANTS.md`).
 
@@ -258,7 +258,8 @@ the Actions tab self-groups: `CI:` (build/test/lint/coverage/docs), `Security:`,
 
 | Workflow | Triggers | Notes |
 |----------|----------|-------|
-| `CI: Rust` | every PR; push `main`¹ | Linux build/test/clippy/fmt run on every PR (Cloud Build, see below). `rust.yml` adds: a macOS build-and-test leg on `push` to `main` only (10x runner cost, so not on every PR); and a 2-OS `keystore-backends` matrix that stays `workflow_dispatch`-only (see `docs/RELEASE.md`'s pre-release checklist). A `ci-gate` job aggregates both into one required check. |
+| `Cloud Build` | every PR; push `main` | Rust, server, supply, meta, TypeScript and Darwin type-check shards run on Cloud Build (`cloudbuild/`). See `cloudbuild/README.md`. |
+| `CI: Native` | push `main` (path-filtered); nightly; manual | Runs the macOS build/test leg and the keystore backend matrix. It has no `pull_request` trigger because macOS minutes cost 10x. |
 | `CI: Coverage` | every PR; push `main`¹ | `cargo-llvm-cov` → Codecov |
 | `CI: Docs` | every PR | rustdoc broken-link gate (`-D warnings`) |
 | `CI: Web` / `CI: MCP` | push/PR, path-filtered | run only when `apps/web/**` / `apps/mcp/**` change; each has an always-run gate job so a required check is always present |

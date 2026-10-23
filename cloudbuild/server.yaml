@@ -1,0 +1,370 @@
+# Server, client, and primitives gates on Cloud Build. This config ports these
+# GitHub jobs. Each job becomes one parallel step (waitFor ['-']):
+#   rust.yml:        primitives, server-feature-clippy (4 crates), native-wire-conformance,
+#                    server-semver, client-wasm, sync-native-deps
+#   conformance.yml: native-conformance
+#
+# Shards run at the same time in one build. Each step uses its own
+# CARGO_TARGET_DIR, so Cargo build-directory locks do not serialize them.
+# This mirrors the separate runners on GitHub. All steps share one sccache
+# bucket. A failing step fails the build, but the other steps still finish
+# because they do not depend on each other.
+#
+# Original event gates (GitHub only; this build runs every step):
+#   - server-feature-clippy ran on push to main only.
+#   - server-semver ran on pull_request only.
+#   - The other jobs ran on both events.
+# The trigger decides when the whole build runs. See the notes in the report.
+#
+# Machine: E2_HIGHCPU_32 (32 vCPU, 32 GB). Ten shards compile at once. Every
+# heavy shard sets CARGO_BUILD_JOBS to bound compiler memory (see
+# cloudbuild/README.md, "Test compilation memory"). The disk holds ten
+# separate target directories.
+#
+# Trigger: mkit-server-{pr,main}.
+
+substitutions:
+  _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.99.1
+
+options:
+  # The trigger runs this config as a dedicated service account. Cloud Build
+  # rejects a custom account with no log option.
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 300
+  # _CACHE_BUCKET / _CI_IMAGE embed the built-in ${PROJECT_ID}.
+  dynamicSubstitutions: true
+timeout: 3600s
+
+steps:
+  # Some gates call `git ls-files`. A trigger checkout has a real .git. A
+  # manual `gcloud builds submit` upload has none (or a stale worktree file),
+  # so build a throwaway repo from the uploaded files. Runs once, before shards.
+  - name: ${_CI_IMAGE}
+    id: git-prep
+    waitFor: ['-']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        if ! git ls-files -z >/dev/null 2>&1; then
+          rm -rf .git
+          git init -q
+          git add -A
+        fi
+
+  - name: ${_CI_IMAGE}
+    id: primitives
+    waitFor: [git-prep]
+    timeout: 2400s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/tmp/target-primitives"
+      - "CARGO_BUILD_JOBS=3"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        cargo clippy --locked -p mkit-primitives -p mkit-primitives-fuzz --all-targets --all-features -- -D warnings
+        cargo nextest run --locked -p mkit-primitives -p mkit-primitives-fuzz -j 3
+        cargo nextest run --locked -p mkit-primitives --no-default-features --features pack-zstd -j 3
+        cargo hack check --locked -p mkit-primitives --lib --feature-powerset
+        cargo nextest run --locked -p mkit-primitives --no-default-features --test closure_platform -j 3
+        cargo nextest run --locked -p mkit-primitives --all-features --test closure_platform -j 3
+        cargo test --locked -p mkit-primitives --doc
+        cargo test --locked -p mkit-primitives --no-default-features --doc
+        # Wasm contracts.
+        cargo check --locked -p mkit-primitives --target wasm32-unknown-unknown
+        cargo check --locked -p mkit-primitives --no-default-features --target wasm32-unknown-unknown
+        cd ..
+        # wasm-pack 0.13.1 is baked into the image. Run the closure fixtures on 32-bit wasm.
+        ( cd rust/crates/mkit-primitives && wasm-pack test --node )
+        # Packaged consumer, native and wasm32.
+        python3 scripts/check-primitives-consumer.py
+        # Graph, fixtures, and stability.
+        python3 scripts/test-publish-primitives.py
+        python3 scripts/publish-primitives.py check
+        python3 scripts/fmt-primitives.py --check
+        python3 scripts/check-primitives-graph.py
+        python3 scripts/check-primitives-fixtures.py
+        python3 scripts/test-primitives-infrastructure.py
+        just check-primitives-stability
+        sccache --show-stats
+
+  # server-feature-clippy (mkit-server). GitHub ran this on push to main only.
+  - name: ${_CI_IMAGE}
+    id: clippy-mkit-server
+    waitFor: [git-prep]
+    timeout: 3000s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/tmp/target-clippy-mkit-server"
+      - "CARGO_BUILD_JOBS=8"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        # The powerset run is the longest shard: 8 build jobs, 50-minute limit.
+        # Library-only avoids dev-dependency feature unification. Depth two bounds the
+        # combinatorial cost.
+        python3 ../scripts/check-feature-names.py
+        cargo hack clippy --locked -p mkit-server --lib --feature-powerset --depth 2 -- -D warnings
+        cargo clippy --locked -p mkit-server --all-targets -- -D warnings
+        cargo clippy --locked -p mkit-server --lib --all-features -- -D warnings
+        sccache --show-stats
+
+  # server-feature-clippy (mkit-rpc). GitHub ran this on push to main only.
+  - name: ${_CI_IMAGE}
+    id: clippy-mkit-rpc
+    waitFor: [git-prep]
+    timeout: 1800s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/tmp/target-clippy-mkit-rpc"
+      - "CARGO_BUILD_JOBS=3"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        # Library-only avoids dev-dependency feature unification. Depth two bounds the
+        # combinatorial cost.
+        python3 ../scripts/check-feature-names.py
+        cargo hack clippy --locked -p mkit-rpc --lib --feature-powerset --depth 2 -- -D warnings
+        cargo clippy --locked -p mkit-rpc --all-targets -- -D warnings
+        cargo clippy --locked -p mkit-rpc --lib --all-features -- -D warnings
+        sccache --show-stats
+
+  # server-feature-clippy (mkit-client). GitHub ran this on push to main only.
+  - name: ${_CI_IMAGE}
+    id: clippy-mkit-client
+    waitFor: [git-prep]
+    timeout: 1800s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/tmp/target-clippy-mkit-client"
+      - "CARGO_BUILD_JOBS=3"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        # Library-only avoids dev-dependency feature unification. Depth two bounds the
+        # combinatorial cost.
+        python3 ../scripts/check-feature-names.py
+        cargo hack clippy --locked -p mkit-client --lib --feature-powerset --depth 2 -- -D warnings
+        cargo clippy --locked -p mkit-client --all-targets -- -D warnings
+        cargo clippy --locked -p mkit-client --lib --all-features -- -D warnings
+        sccache --show-stats
+
+  # server-feature-clippy (mkit-sync). GitHub ran this on push to main only.
+  - name: ${_CI_IMAGE}
+    id: clippy-mkit-sync
+    waitFor: [git-prep]
+    timeout: 1800s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/tmp/target-clippy-mkit-sync"
+      - "CARGO_BUILD_JOBS=3"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        # Library-only avoids dev-dependency feature unification. Depth two bounds the
+        # combinatorial cost.
+        python3 ../scripts/check-feature-names.py
+        cargo hack clippy --locked -p mkit-sync --lib --feature-powerset --depth 2 -- -D warnings
+        cargo clippy --locked -p mkit-sync --all-targets -- -D warnings
+        cargo clippy --locked -p mkit-sync --lib --all-features -- -D warnings
+        sccache --show-stats
+
+  - name: ${_CI_IMAGE}
+    id: native-wire-conformance
+    waitFor: [git-prep]
+    timeout: 1800s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/tmp/target-native-wire-conformance"
+      - "CARGO_BUILD_JOBS=3"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        python3 scripts/test-publish-bounded-decoder.py
+        python3 scripts/test-server-gates.py --hosted-only
+        python3 scripts/check-launch-feature-graph.py
+        cd rust
+        # Native bounded decoder parity.
+        cargo nextest run --locked -p mkit-core --all-features --lib -j 3 -E 'test(zstd_tests)' --failure-output immediate
+        cd ..
+        # Bounded decoder on wasm32 (needs node and wasm-pack from the image).
+        bash scripts/wasm-ruzstd-check.sh
+        cd rust
+        # Native TestHost contracts over HTTP.
+        cargo nextest run --locked -p mkit-server-conformance --features test-host --lib --test test_host --test test_host_migrations --test test_host_regressions -j 3 --success-output immediate --failure-output immediate --no-fail-fast
+        sccache --show-stats
+
+  # server-semver. GitHub ran this on pull_request only.
+  - name: ${_CI_IMAGE}
+    id: server-semver
+    waitFor: [git-prep]
+    timeout: 1200s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/tmp/target-server-semver"
+      - "CARGO_BUILD_JOBS=3"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        # main keeps the released version until release preparation, and accumulates
+        # 0.6 changes with no 0.5.x patch release planned. A 0.x crate's next minor
+        # release may break its public API. cargo-semver-checks calls that the "major"
+        # release type for 0.x versions; "minor" would still reject a breaking change.
+        # TODO(0.6.0 release prep): restore `--release-type patch` against the 0.6.0
+        # baseline once 0.6.0 is tagged (see docs/RELEASE.md).
+        cargo semver-checks -p mkit-server --all-features --baseline-version 0.5.0 --release-type major
+        # All-features enables the performance wrapper, which already boxes stages.
+        # Exercise the plain path and the wasm-compatible decoder too.
+        export CARGO_PROFILE_DEV_DEBUG=2
+        cargo test --locked -p mkit-server --no-default-features --features memory,pack-ruzstd,futures/default --lib fifty_deep_quota_boundary_uses_a_small_stack -- --test-threads 3
+        cargo test --locked -p mkit-server --no-default-features --features memory,pack-ruzstd,futures/default --lib maximum_configured_member_chain_matches_native_on_a_small_stack -- --test-threads 3
+        cargo test --locked -p mkit-server --no-default-features --features memory,pack-ruzstd,futures/default --lib extraction_step_futures_stay_small -- --test-threads 3
+        sccache --show-stats
+
+  - name: ${_CI_IMAGE}
+    id: client-wasm
+    waitFor: [git-prep]
+    timeout: 1200s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/tmp/target-client-wasm"
+      - "CARGO_BUILD_JOBS=3"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        # mkit-client is the runtime-independent protocol client. Its wasm32 build is
+        # the product requirement, so the gate builds it for the real target. It also
+        # holds the dependency graph free of async runtimes and C compression.
+        cd rust
+        cargo build --locked -p mkit-client --target wasm32-unknown-unknown
+        cargo build --locked -p mkit-client --no-default-features --target wasm32-unknown-unknown
+        cd ..
+        bash scripts/check-wasm-dep-graph.sh
+        sccache --show-stats
+
+  - name: ${_CI_IMAGE}
+    id: sync-native-deps
+    waitFor: [git-prep]
+    timeout: 900s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/tmp/target-sync-native-deps"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        # mkit-sync's connect-native feature is a small native HTTP channel: gzip only,
+        # no zstd-sys, no second C crypto library, no HTTP/2 or Connect runtime. The
+        # gate reads the resolved dependency graph.
+        bash scripts/check-sync-native-deps.sh
+        sccache --show-stats
+
+  - name: ${_CI_IMAGE}
+    id: native-conformance
+    waitFor: [git-prep]
+    timeout: 1800s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/tmp/target-native-conformance"
+      - "CARGO_BUILD_JOBS=3"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        # conformance.yml native-conformance: portable runner builds without the
+        # reference orchestration, then the native suites run.
+        cd rust
+        cargo check --locked -p mkit-server-conformance --no-default-features --all-targets
+        cargo tree --locked -p mkit-server-conformance --no-default-features -e normal --prefix none --format '{p}' > /tmp/conformance-dependencies.txt
+        if grep -E '^mkit-server v' /tmp/conformance-dependencies.txt; then
+          echo 'ERROR: portable conformance depends on reference orchestration'
+          exit 1
+        fi
+        cargo nextest run --locked -p mkit-server-conformance --all-features -j 3
+        sccache --show-stats

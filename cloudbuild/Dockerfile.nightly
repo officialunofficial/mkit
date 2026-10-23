@@ -1,0 +1,66 @@
+# Heavy-tooling image for the nightly and weekly Cloud Build jobs.
+# Built by cloudbuild/builder-nightly.yaml. Consumed by nightly-fuzz.yaml,
+# nightly-formal.yaml, and nightly-bench.yaml.
+#
+# It extends the baked CI image (stable Rust 1.99.1, nextest, sccache, just,
+# node 22, cargo-mutants) and adds:
+#   - nightly Rust and cargo-fuzz (fuzz.yml)
+#   - Java 21, Quint, elan (formal.yml; Apalache and Lean download at run time)
+#   - Kani (formal.yml kani job)
+# Pins match .github/workflows/formal.yml and the justfile formal_* variables.
+ARG BASE_IMAGE=us-east4-docker.pkg.dev/official-unofficial/docker/mkit-ci:rust-1.99.1
+FROM ${BASE_IMAGE}
+
+# Cloud Build sets HOME to /builder/home for every step. Keep tool state in
+# fixed paths so the baked files stay visible at run time.
+ENV ELAN_HOME=/opt/elan \
+    KANI_HOME=/opt/kani \
+    FV_HOME=/opt/mkit-fv \
+    JAVA_HOME=/opt/jdk-21 \
+    PATH=/opt/jdk-21/bin:/opt/elan/bin:/usr/local/cargo/bin:${PATH}
+
+# Nightly toolchain for cargo-fuzz. Minimal profile keeps the image small.
+# Build cargo-fuzz and cargo-mutants from source, as the old workflows did.
+# The prebuilt binaries fail here: cargo-fuzz is a musl build that picks the
+# musl target, and cargo-mutants needs a newer glibc than Debian bookworm.
+RUN rustup toolchain install nightly --profile minimal \
+    && cargo install cargo-fuzz cargo-mutants --locked --force \
+    && rm -rf "${CARGO_HOME:-/usr/local/cargo}/registry"
+
+# Java 21 (Temurin). TLC runs inside the Apalache jar and needs it.
+ARG JDK_URL=https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse
+RUN mkdir -p /opt/jdk-21 \
+    && curl -fsSL "${JDK_URL}" | tar -xz -C /opt/jdk-21 --strip-components=1 \
+    && java -version
+
+# Quint, pinned to the formal.yml value.
+ARG QUINT_VERSION=0.32.0
+RUN npm install -g "@informalsystems/quint@${QUINT_VERSION}" && quint --version
+
+# elan, pinned and sha256-checked like formal.yml. It fetches the Lean version
+# named by formal/lean/lean-toolchain on first use.
+ARG ELAN_VERSION=4.2.4
+ARG ELAN_SHA256=42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63
+RUN curl -sSfL -o /tmp/elan.tgz \
+        "https://github.com/leanprover/elan/releases/download/v${ELAN_VERSION}/elan-x86_64-unknown-linux-gnu.tar.gz" \
+    && echo "${ELAN_SHA256}  /tmp/elan.tgz" | sha256sum -c - \
+    && tar -xzf /tmp/elan.tgz -C /tmp \
+    && /tmp/elan-init -y --default-toolchain none \
+    && rm -f /tmp/elan.tgz /tmp/elan-init
+
+# Kani, pinned to the formal.yml value. `cargo kani setup` downloads the
+# CBMC bundle and the Kani nightly toolchain.
+ARG KANI_VERSION=0.68.0
+RUN cargo install --locked kani-verifier --version "${KANI_VERSION}" \
+    && cargo kani setup \
+    && rm -rf "${CARGO_HOME:-/usr/local/cargo}/registry"
+
+# Newer glibc. The base image is Debian bookworm (glibc 2.36). The Quint Rust
+# evaluator, downloaded on first use, needs glibc 2.39 or newer. Pull libc6
+# from Debian trixie only, so the rest of the image stays on bookworm.
+RUN echo 'deb http://deb.debian.org/debian trixie main' > /etc/apt/sources.list.d/trixie.list \
+    && printf 'Package: *\nPin: release n=trixie\nPin-Priority: 100\n' > /etc/apt/preferences.d/trixie \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends -t trixie libc6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ldd --version | head -1

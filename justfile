@@ -1,6 +1,6 @@
 # Local CI parity. Each `ci-*` recipe is a literal extraction of commands
 # already run by cloudbuild/ci.yaml / cloudbuild/security.yaml /
-# cloudbuild/docs.yaml / cloudbuild/geiger.yaml / .github/workflows/rust.yml /
+# cloudbuild/docs.yaml / cloudbuild/geiger.yaml / cloudbuild/server.yaml /
 # .github/workflows/buf.yml
 # — no new logic lives here, so keep this file in sync with those when they
 # change instead of letting it drift into a second source of truth.
@@ -26,9 +26,9 @@
 #   - cloudbuild/ci.yaml's apps/repo-worker and apps/keys-worker legs
 #     (separate Cloudflare Workers builds, own toolchain/workspace,
 #     including their wasm32 cargo builds).
-#   - rust.yml's keystore-backends matrix (2-OS native keystore backends —
-#     stays workflow_dispatch-only by design; run it on GitHub, not here).
-#   - web.yml's wasm-pack bundler smoke and bun test/lint/build.
+#   - native.yml's keystore-backends matrix (2-OS native keystore backends —
+#     runs nightly on GitHub, not here).
+#   - cloudbuild/ts.yaml's wasm-pack bundler smoke and bun test/lint/build.
 #
 # Usage: `just ci` for the host-appropriate subset, or `just ci-linux` /
 # `just ci-macos` / `just ci-security` / `just ci-docs` /
@@ -82,7 +82,7 @@ ci-linux:
     # check. Locally this just checks against whatever toolchain is active.
     ( cd rust && cargo check --workspace --locked --all-targets )
 
-# Mirrors .github/workflows/rust.yml's `build-and-test` job (macOS leg).
+# Mirrors .github/workflows/native.yml's `build-and-test` job (macOS leg).
 ci-macos:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -96,7 +96,7 @@ ci-macos:
     ( cd contrib/signers && cargo nextest run --locked --all-features )
     # macOS runners always have `git` on PATH — MKIT_TEST_STRICT=1 makes
     # git-dependent tests fail loudly instead of silently skipping if it's
-    # missing here too. See rust.yml's "Test (nextest)" step comment.
+    # missing here too. See cloudbuild/ci.yaml's nextest step comment.
     ( cd rust && MKIT_TEST_STRICT=1 cargo nextest run --locked --workspace --all-features )
     # Indexed verification with one Extract step per slice (default chains).
     ( cd rust && MKIT_TEST_EXTRACT_CHAIN=1 cargo nextest run --locked -p mkit-server --all-features -E 'test(~indexed::)' )
@@ -242,8 +242,8 @@ _version-contract:
 
 # ---------------------------------------------------------------------------
 # Formal verification (docs/FORMAL.md, epic MKIT-17). Unlike the ci-*
-# recipes above, these are the source: .github/workflows/formal.yml (nightly
-# + workflow_dispatch) calls them, so change them here, not there. Every
+# recipes above, these are the source: cloudbuild/nightly-formal.yaml (Cloud
+# Scheduler, nightly) calls them, so change them here, not there. Every
 # script prints one "<check> <expected outcome>" line per check and exits 1
 # on any unexpected outcome (a holding invariant that should be violated
 # counts, so a vacuous property fails the run).

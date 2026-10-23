@@ -15,13 +15,14 @@
 # Trigger: mkit-codegen-{pr,main} — path-filtered to protos / build.rs /
 # scripts/regen-*.sh / **/generated/**.
 #
-# Also runs `buf lint` + `buf breaking` against every proto module registered
-# in the repo-root buf.yaml (today: mkit.transport.v1, SPEC-TRANSPORT-CONNECT
-# §1/§10 — mkit#677 folds mkit.rpc.v1/mkit.repo.v1 into the same workspace
-# later). `buf` isn't baked into _CI_IMAGE (a runtime download here is far
-# cheaper than a Dockerfile.ci rebuild+republish for one extra static
-# binary); bump BUF_VERSION deliberately, mirroring how PROTOC_VERSION is
-# pinned in Dockerfile.ci.
+# Also runs `buf lint` + `buf breaking` against every module of the repo-root
+# buf.yaml workspace, then the same two checks for the standalone
+# rust/crates/mkit-trust-rpc/buf.yaml module. That module is outside the
+# workspace, so the root run does not see it. A last step runs the
+# server-hook golden JSON check. Together these replace
+# .github/workflows/buf.yml and .github/workflows/proto.yml.
+# The CI image bakes buf. The step downloads _BUF_VERSION only when the
+# image has no buf. Keep _BUF_VERSION equal to the version in Dockerfile.ci.
 #
 # `buf breaking` compares against the target branch's `buf.yaml` module tip
 # (`.git#branch=main,subdir=proto`) — a no-op the first time a module is
@@ -68,17 +69,43 @@ steps:
       - -c
       - |
         set -euo pipefail
-        curl -sSL -o /usr/local/bin/buf \
-          "https://github.com/bufbuild/buf/releases/download/v${_BUF_VERSION}/buf-Linux-x86_64"
-        chmod +x /usr/local/bin/buf
+        if ! command -v buf >/dev/null; then
+          curl -sSL -o /usr/local/bin/buf \
+            "https://github.com/bufbuild/buf/releases/download/v${_BUF_VERSION}/buf-Linux-x86_64"
+          chmod +x /usr/local/bin/buf
+        fi
         buf --version
+        # Workspace modules: rpc, repo-worker, proto.
         buf lint
-        # First commit of a module has nothing to compare against — buf
-        # errors "had no .proto files" rather than passing vacuously, so
-        # skip the check when the module is new on this branch relative to
-        # the merge target instead of treating that as a failure.
+        # A new module has nothing to compare against. buf errors with
+        # "had no .proto files" instead of passing, so skip the check
+        # when the module is new on this branch.
         if git cat-file -e main:proto 2>/dev/null; then
           buf breaking --against '.git#branch=main'
         else
           echo "proto/ does not exist on main yet — skipping buf breaking (nothing to compare)."
         fi
+        # Standalone module outside the root workspace (proto.yml covered it).
+        trust=rust/crates/mkit-trust-rpc
+        buf lint "$$trust"
+        if git cat-file -e "main:$$trust/buf.yaml" 2>/dev/null; then
+          buf breaking "$$trust" --against ".git#branch=main,subdir=$$trust"
+        else
+          echo "$$trust is new on this branch — skipping buf breaking."
+        fi
+
+  - name: ${_CI_IMAGE}
+    id: server-hook-goldens
+    waitFor: ['-']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        # Replaces the second step of .github/workflows/buf.yml.
+        if ! command -v buf >/dev/null; then
+          curl -sSL -o /usr/local/bin/buf \
+            "https://github.com/bufbuild/buf/releases/download/v${_BUF_VERSION}/buf-Linux-x86_64"
+          chmod +x /usr/local/bin/buf
+        fi
+        bash scripts/check-server-hooks-goldens.sh

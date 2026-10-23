@@ -1,0 +1,88 @@
+# Nightly libfuzzer smoke run on Cloud Build. Ports .github/workflows/fuzz.yml.
+# Each target runs for _FUZZ_SECONDS (60 in the old workflow). This is a
+# spot-check, not a campaign. GitHub Actions used continue-on-error and
+# uploaded crash artifacts. Here the step runs every target, then fails the
+# build if any target failed. Cloud Build logs replace the artifact upload.
+#
+# Manual repro:
+#   cd rust/fuzz && cargo +nightly fuzz run delta --features libfuzzer -- -max_total_time=60
+#
+# Trigger: mkit-nightly-fuzz (manual-event trigger).
+# Cloud Scheduler: '0 4 * * *' UTC.
+# Smoke run: --substitutions=_FUZZ_SECONDS=5,_TARGETS="delta pack"
+
+substitutions:
+  _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache
+  _NIGHTLY_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci-nightly:rust-1.99.1
+  _FUZZ_SECONDS: "60"
+  # Empty means every target. Else a space-separated list of target names.
+  _TARGETS: ""
+
+options:
+  # A custom trigger service account needs a log option.
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 200
+  dynamicSubstitutions: true
+# 25 targets at 60 s plus one build per target.
+timeout: 10800s
+
+steps:
+  - name: ${_NIGHTLY_IMAGE}
+    id: fuzz
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=nightly-fuzz"
+      - "FUZZ_SECONDS=${_FUZZ_SECONDS}"
+      - "ONLY_TARGETS=${_TARGETS}"
+    args:
+      - -c
+      - |
+        set -uo pipefail
+        # Each entry is "directory:target".
+        ws=rust/fuzz
+        prim=rust/crates/mkit-primitives/fuzz
+        all=()
+        for t in delta pack tree software_key_record rpc_decode git_commit_parse \
+                 git_tag_parse git_tree_parse merkle_packlist merkle_proof \
+                 sparse_verify disclosure_decode verify_disclosure pack_entries \
+                 verify_closure grant_parse epoch_visibility_parse span_decode \
+                 verify_span; do
+          all+=("$$ws:$$t")
+        done
+        all+=("$$prim:compute_schedule" "$$prim:acceptance_decode")
+        for t in closure_steps closure_pages pair_steps pair_checkpoint; do
+          all+=("$$prim:$$t")
+        done
+
+        # Seed the acceptance corpus from the canonical fixtures.
+        mkdir -p "$$prim/corpus/acceptance_decode"
+        cp rust/crates/mkit-primitives/fixtures/acceptance/*.bin "$$prim/corpus/acceptance_decode/"
+
+        root=$$(pwd)
+        failed=()
+        for entry in "$${all[@]}"; do
+          dir=$${entry%%:*}
+          target=$${entry##*:}
+          if [ -n "$$ONLY_TARGETS" ] && ! grep -qw -- "$$target" <<<"$$ONLY_TARGETS"; then
+            continue
+          fi
+          echo "=== fuzz $$target ($$dir, $${FUZZ_SECONDS}s)"
+          # cargo-fuzz does not infer required-features, so pass libfuzzer.
+          if ! (cd "$$root/$$dir" && cargo +nightly fuzz run "$$target" --features libfuzzer -- -max_total_time="$$FUZZ_SECONDS"); then
+            echo "=== FUZZ FAILED: $$target"
+            ls -R "$$root/$$dir/artifacts" 2>/dev/null | head -20 || true
+            failed+=("$$target")
+          fi
+        done
+        sccache --show-stats || true
+        if [ "$${#failed[@]}" -gt 0 ]; then
+          echo "failed fuzz targets: $${failed[*]}"
+          exit 1
+        fi
+        echo "all fuzz targets passed"
