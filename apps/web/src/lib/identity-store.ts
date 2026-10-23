@@ -1,6 +1,6 @@
-// Client identity / session state (design note §6).
+// Client identity state (design note §6).
 //
-// Boundary rule: TanStack Query owns server login and repository state. This
+// Boundary rule: TanStack Query owns repository state. This
 // Zustand store owns signing keys and public passkey recovery metadata. Only client-side, UI-owned, synchronous
 // identity lives here — never server data (refs, objects, commit logs).
 //
@@ -55,6 +55,8 @@ export type IdentityState = {
   /** Wipe the in-memory seed (keeps credentialId so the player can re-derive). */
   lock: () => void
   setRoom: (room: string) => void
+  /** Forget the signed-in identity and wipe the seed, keeping the passkey so the player can sign in again. */
+  signOut: () => void
   /** Full reset — forget the passkey too. */
   reset: () => void
 }
@@ -161,6 +163,8 @@ export const useIdentityStore = create<IdentityState>()(
       // now-gone in-memory seed, so leaving it stuck `true` would mislabel the
       // locked state.
       lock: () => set({ seedHex: null, unlocked: false, ephemeral: false }),
+      signOut: () =>
+        set({ knownPublicKey: null, ed25519PubkeyHex: null, seedHex: null, unlocked: false, ephemeral: false }),
       setRoom: (room) => set({ room: room.trim() || DEFAULT_ROOM }),
       // Full reset — forget the passkey AND return to the default room (persist
       // now writes `room`, so a "forget everything" must reset it too).

@@ -1,18 +1,16 @@
 #!/usr/bin/env node
-// One real WebAuthn identity; no workspace creation, terminal, or model requests.
+// One real WebAuthn identity; purely client-side, so no same-origin API requests are expected.
 import assert from 'node:assert/strict';
 import { access } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
 
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
-  console.log('Usage: node scripts/verify-auth.mjs [http://localhost:4173] [--mock-session]\nOptional: CHROME_EXECUTABLE=/path/to/chromium');
+  console.log('Usage: node scripts/verify-auth.mjs [http://localhost:4173]\nOptional: CHROME_EXECUTABLE=/path/to/chromium');
   process.exit(0);
 }
-const mockSession = args.includes('--mock-session');
 const positional = args.filter((arg) => !arg.startsWith('--'));
-if (positional.length > 1 || args.some((arg) => arg.startsWith('--') && arg !== '--mock-session')) {
-  console.log(JSON.stringify({ passed: false, stage: 'arguments', error: 'Expected one URL and optional --mock-session.' }));
+if (positional.length > 1 || args.some((arg) => arg.startsWith('--'))) {
+  console.log(JSON.stringify({ passed: false, stage: 'arguments', error: 'Expected at most one URL.' }));
   process.exit(1);
 }
 
@@ -20,14 +18,12 @@ const routes = [
   ['/', 'Overview'], ['/concepts', 'Concepts'],
   ['/performance', 'Performance'], ['/parity', 'Parity'], ['/specs', 'Specs'], ['/multiplayer', 'Multiplayer'],
 ];
-const report = { passed: false, mockSession, checks: [], ceremonies: { created: 0, asserted: 0 } };
+const report = { passed: false, checks: [], ceremonies: { created: 0, asserted: 0 } };
 let browser;
 let chromium;
 let stage = 'browser setup';
 let base;
-let session = null;
-let sessionDeletes = 0;
-let forbiddenWrites = 0;
+let apiRequests = 0;
 let browserErrors = 0;
 
 function check(name) { report.checks.push(name); }
@@ -85,7 +81,7 @@ async function storageIsPublic(page) {
     if (entries['mkit-auth-change']) {
       const signal = JSON.parse(entries['mkit-auth-change']);
       assert.deepEqual(Object.keys(signal).sort(), ['action', 'nonce']);
-      assert(['session', 'logout', 'lock'].includes(signal.action));
+      assert(['login', 'logout', 'lock'].includes(signal.action));
       assert.equal(typeof signal.nonce, 'string');
     }
     if (entries['mkit-query-cache']) {
@@ -99,10 +95,10 @@ async function storageIsPublic(page) {
         assert(query.state.data === null || typeof query.state.data === 'string');
       }
     }
-    // Catch signing/session authority accidentally persisted under a new app key too.
+    // Catch signing authority accidentally persisted under a new app key too.
     for (const [key, value] of Object.entries(entries)) {
       if (!key.startsWith('mkit')) continue;
-      assert(!/"(?:seedHex|seed|privateKey|unlocked|signingStatus|accessToken|sessionToken)"\s*:/.test(value));
+      assert(!/"(?:seedHex|seed|privateKey|unlocked|signingStatus|accessToken)"\s*:/.test(value));
     }
   }
 }
@@ -119,29 +115,10 @@ try {
   context.setDefaultTimeout(30_000);
   context.setDefaultNavigationTimeout(45_000);
   context.on('page', (page) => page.on('pageerror', () => { browserErrors++; }));
-  await context.route('**/*', async (route) => {
-    const request = route.request();
+  // Identity is local to the browser: the site must make no same-origin API requests while signing in or out.
+  context.on('request', (request) => {
     const url = new URL(request.url());
-    const method = request.method();
-    const isSession = url.origin === base.origin && url.pathname === '/api/workspaces/session';
-    if (isSession && method === 'DELETE') sessionDeletes++;
-    if (url.origin === base.origin && url.pathname.startsWith('/api/workspaces') && !isSession
-      && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-      forbiddenWrites++;
-      await route.abort();
-      return;
-    }
-    if (!mockSession || !isSession) { await route.continue(); return; }
-    if (method === 'POST') {
-      const publicKey = request.headers()['x-public-key'];
-      if (!publicKey || !/^[0-9a-f]{64}$/.test(publicKey)) {
-        await route.fulfill({ status: 400, json: { error: 'Missing public signing identity.' } });
-        return;
-      }
-      session = { id: randomUUID(), publicKey, expiresAt: Date.now() + 7 * 86_400_000 };
-    } else if (method === 'DELETE') session = null;
-    else if (method !== 'GET') { await route.fulfill({ status: 405, body: '' }); return; }
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(session) });
+    if (url.origin === base.origin && url.pathname.startsWith('/api/')) apiRequests++;
   });
   const page = await context.newPage();
   const cdp = await context.newCDPSession(page);
@@ -225,19 +202,17 @@ try {
   assert(report.ceremonies.asserted > JSON.parse(afterUnlock).asserted);
   const beforeSignout = ceremonyCount();
   stage = 'reference-page sign-out reaches both tabs';
-  const deletesBeforeSignout = sessionDeletes;
   if (!(await accountRegion(other).getByRole('button', { name: 'Sign out', exact: true }).isVisible())) await accountRegion(other).getByRole('button', { name: 'Account', exact: true }).click();
   await accountRegion(other).getByRole('button', { name: 'Sign out', exact: true }).click();
   if (await other.getByRole('button', { name: 'Close account', exact: true }).isVisible()) await other.getByRole('button', { name: 'Close account', exact: true }).click();
   await account(other, 'signed-out', 'locked', '');
   await account(page, 'signed-out', 'locked', '');
-  assert(sessionDeletes > deletesBeforeSignout);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await account(page, 'signed-out', 'locked', '');
   await storageIsPublic(page);
   await storageIsPublic(other);
   assert.equal(ceremonyCount(), beforeSignout);
-  assert.equal(forbiddenWrites, 0);
+  assert.equal(apiRequests, 0);
   assert.equal(browserErrors, 0);
   check('reference-page sign-out reaches both tabs and survives refresh; persisted caches are public only');
   report.passed = true;
@@ -246,7 +221,7 @@ try {
   if (error?.name === 'AssertionError') report.assertion = error.message.split('\n').slice(0, 4).join('\n');
   // Never serialize Playwright exceptions: their call logs can contain cookies or request headers.
   report.stage = stage;
-  report.error = 'Verification failed at this stage. Check the Account contract, session endpoint, and Chromium PRF support.';
+  report.error = 'Verification failed at this stage. Check the Account contract and Chromium PRF support.';
   process.exitCode = 1;
 } finally {
   if (browser) await browser.close().catch(() => {});
