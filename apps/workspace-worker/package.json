@@ -13,7 +13,7 @@
     "wasm:build": "cd ../../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir ../../../apps/workspace-worker/vendor/mkit-wasm --release"
   },
   "dependencies": {
-    "@cloudflare/sandbox": "0.12.10"
+    "@cloudflare/sandbox": "1.0.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261016.1",
