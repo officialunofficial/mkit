@@ -53,6 +53,7 @@ fn account(size: usize) {
 // retaining the observable overlap of the old and new requested allocations.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: The caller upholds the `GlobalAlloc::alloc` contract for `layout`.
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() {
             account(layout.size());
@@ -61,6 +62,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: The caller upholds the `GlobalAlloc::alloc_zeroed` contract for `layout`.
         let pointer = unsafe { System.alloc_zeroed(layout) };
         if !pointer.is_null() {
             account(layout.size());
@@ -70,6 +72,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         LIVE.fetch_sub(layout.size(), Ordering::SeqCst);
+        // SAFETY: The caller passes a pointer and layout from this allocator.
         unsafe { System.dealloc(pointer, layout) };
     }
 }
