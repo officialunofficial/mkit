@@ -9,7 +9,7 @@ its source, build scripts, and deployment configuration.
 
 ## Local build
 
-Prerequisites: Node.js 22, Bun 1.3.14, Rust 1.95.0, the
+Prerequisites: Node.js 22, Bun 1.3.14, Rust 1.99.1, the
 `wasm32-unknown-unknown` target, and `wasm-pack` 0.13.1. (`protoc` is no longer
 required &mdash; `mkit-rpc` builds from its vendored generated sources by default.)
 

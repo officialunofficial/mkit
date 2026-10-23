@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Remove the hosted-workspace Cloudflare Worker (`apps/workspace-worker`) and
+  its CI, Dependabot and documentation entries. The website no longer has a
+  server session: the passkey identity (create, unlock, lock signing, sign out,
+  cross-tab sync) is kept entirely in the browser, and sign-out now forgets the
+  remembered identity locally while keeping the passkey credential for the next
+  sign-in. No Rust, wire or stored-format change.
+
+- Raise the pinned Rust toolchain and MSRV from 1.95.0 to 1.99.1 across the
+  workspace, `contrib/signers`, the worker crates, CI workflows, the CI image
+  and docs. Adopt the new `Atomic::try_update` name, `bit_width`, and
+  `assert_eq!` forms flagged by the newer clippy; the `assert_is_empty`,
+  `unused_async_trait_impl` and `chunks_exact_to_as_chunks` pedantic lints are
+  allowed. No behavior, wire or stored-format change.
+
 - `mkit-primitives` raises the `VerifyLimits::indexed()` default `work` budget
   from 1,000,000,000 to `16 << 30` (17,179,869,184). The all-entry driver
   charges about 70,000–108,000 work units per raw 4 KiB blob entry, growing

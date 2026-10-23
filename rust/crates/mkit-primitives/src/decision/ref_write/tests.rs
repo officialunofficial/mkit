@@ -1014,7 +1014,7 @@ fn source_fence_is_complete_separate_and_not_required_for_saved_replay() {
 fn variable_length_fact_comparisons_are_in_the_work_budget() {
     let changes = [change(Any)];
     let mut snap = snapshot();
-    for byte in [b'a', b'b', b'c', b'd'] {
+    for byte in *b"abcd" {
         let mut text = "refs/heads/".to_owned();
         text.push_str(&"z".repeat(1000));
         text.push(char::from(byte));

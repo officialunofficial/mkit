@@ -48,7 +48,7 @@ impl SliceBudget {
     pub fn charge_operations(&self, operations: u32) -> bool {
         let reserved = self
             .used
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
                 used.checked_add(operations)
                     .filter(|total| *total <= self.limit)
             })
@@ -131,7 +131,7 @@ impl SliceBudget {
     pub fn charge_many(&self, calls: u32) -> Result<(), StoreError> {
         let reserved = self
             .used
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
                 used.checked_add(calls).filter(|total| *total <= self.limit)
             })
             .is_ok();

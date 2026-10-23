@@ -1,6 +1,6 @@
 # clippy configuration for the mkit workspace.
 
-msrv = "1.95"
+msrv = "1.99.1"
 
 cognitive-complexity-threshold = 30
 too-many-arguments-threshold = 8

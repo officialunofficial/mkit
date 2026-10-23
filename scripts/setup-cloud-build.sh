@@ -26,7 +26,7 @@ REGION="${REGION:-us-east4}"            # connection + triggers + GAR
 CONNECTION="${CONNECTION:-github}"
 REPO="${REPO:-officialunofficial-mkit}"
 CACHE_BUCKET="${CACHE_BUCKET:-${PROJECT}-mkit-sccache}"
-CI_IMAGE="${CI_IMAGE:-us-east4-docker.pkg.dev/${PROJECT}/docker/mkit-ci:rust-1.95.0}"
+CI_IMAGE="${CI_IMAGE:-us-east4-docker.pkg.dev/${PROJECT}/docker/mkit-ci:rust-1.99.1}"
 GAR_REPO="${GAR_REPO:-docker}" # GAR repo (us-east4) the CI image is pushed to
 
 REPO_RES="projects/${PROJECT}/locations/${REGION}/connections/${CONNECTION}/repositories/${REPO}"

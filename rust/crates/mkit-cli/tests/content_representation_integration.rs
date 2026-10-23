@@ -76,8 +76,8 @@ fn fixture() -> (tempfile::TempDir, mkit_core::hash::Hash) {
 fn status_diff_and_restage_preserve_chunked_identity() {
     let (dir, hash) = fixture();
     let root = dir.path();
-    assert!(ok(root, &["status", "--porcelain"]).stdout.is_empty());
-    assert!(ok(root, &["diff"]).stdout.is_empty());
+    assert_eq!(ok(root, &["status", "--porcelain"]).stdout, [] as [u8; 0]);
+    assert_eq!(ok(root, &["diff"]).stdout, [] as [u8; 0]);
     for args in [&["add", "a"][..], &["add", "-u"], &["add", "-A"]] {
         // Invalidate stat cache to force comparison against the canonical writer.
         let layout = RepoLayout::single(root);
@@ -90,7 +90,7 @@ fn status_diff_and_restage_preserve_chunked_identity() {
             index::read_index(&layout).unwrap().entries[0].object_hash,
             hash
         );
-        assert!(ok(root, &["diff", "--staged"]).stdout.is_empty());
+        assert_eq!(ok(root, &["diff", "--staged"]).stdout, [] as [u8; 0]);
     }
 }
 
@@ -104,7 +104,7 @@ fn restaging_chunked_file_as_symlink_keeps_a_blob_target() {
         std::os::unix::fs::symlink("abcdef", root.join("a")).unwrap();
         ok(root, args);
         ok(root, &["commit", "-m", "replace file with symlink"]);
-        assert!(ok(root, &["status", "--porcelain"]).stdout.is_empty());
+        assert_eq!(ok(root, &["status", "--porcelain"]).stdout, [] as [u8; 0]);
         // Materializing the committed entry must preserve the symlink target.
         fs::remove_file(root.join("a")).unwrap();
         ok(root, &["restore", "a"]);

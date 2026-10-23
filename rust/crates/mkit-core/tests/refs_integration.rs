@@ -89,7 +89,7 @@ fn golden_index_empty_round_trips() {
         "golden pins the current version"
     );
     let idx = index::deserialize(&bytes).unwrap();
-    assert!(idx.entries.is_empty());
+    assert_eq!(idx.entries, [] as [mkit_core::IndexEntry; 0]);
     assert_eq!(idx.serialize(), bytes, "round-trip is byte-identical");
 }
 

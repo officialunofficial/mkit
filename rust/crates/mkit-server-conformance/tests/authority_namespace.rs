@@ -492,7 +492,10 @@ async fn authority_mode_refuses_valid_owner_grant_epoch_and_visibility_statement
     mkit_attest::grant::verify_visibility_statement(&verifier, &visibility, &identity, now)
         .unwrap();
     let (pipe, _, _) = build(cfg).unwrap();
-    assert!(pipe.server_info().grant_schemes.is_empty());
+    assert_eq!(
+        pipe.server_info().grant_schemes,
+        [] as [std::string::String; 0]
+    );
     let signer = Signer::new([7; 32], audience, &format!("{NS}/repository"));
     let credentials = signer
         .sign_body(Procedure::ReadRef.connect_path(), b"{}")

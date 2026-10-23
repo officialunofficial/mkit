@@ -3915,7 +3915,7 @@ fn late(
     let (clock, left) = (clock.clone(), AtomicU32::new(n));
     move |_, _, _| {
         if left
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |l| l.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |l| l.checked_sub(1))
             .is_ok()
         {
             clock.advance(i64::try_from(WINDOW).unwrap() + 1);
@@ -3977,7 +3977,7 @@ fn interfere(n: u32) -> impl Fn(&MemoryKv, &Partition, &Batch) + Send + Sync {
     let left = AtomicU32::new(n);
     move |kv, p, _| {
         if left
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |l| l.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |l| l.checked_sub(1))
             .is_ok()
         {
             let v = keys::layout_version();
@@ -5597,7 +5597,7 @@ fn reserved_replan_exhaustion_from_guard_contention_aborts_internal() {
         );
         if guarded
             && left
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |l| l.checked_sub(1))
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |l| l.checked_sub(1))
                 .is_ok()
         {
             let batch = if now(kv.get(p, &layout)).unwrap().is_some() {

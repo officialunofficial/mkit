@@ -89,7 +89,7 @@ async fn run_emits_only_json_and_honors_separate_control_binding() {
     assert_eq!(json["cases"][0]["status"], "fail");
     let empty = invoke(args(host.base_url(), "wire", "no-such-case")).await;
     assert_eq!(empty.status.code(), Some(2));
-    assert!(empty.stdout.is_empty());
+    assert_eq!(empty.stdout, [] as [u8; 0]);
     bad_server.abort();
     host.shutdown().await;
 }
@@ -114,7 +114,7 @@ async fn invalid_profile_and_unavailable_binding_are_setup_errors() {
     std::fs::write(&path, profile_text("http://127.0.0.1:1")).unwrap();
     let unavailable = invoke(args()).await;
     assert_eq!(unavailable.status.code(), Some(2));
-    assert!(unavailable.stdout.is_empty());
+    assert_eq!(unavailable.stdout, [] as [u8; 0]);
 }
 
 #[cfg(feature = "reference-runner")]

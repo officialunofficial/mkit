@@ -20,7 +20,7 @@
 # CONCURRENCY. No built-in lock. Keep one trigger. Seeding is skip-if-indexed.
 
 substitutions:
-  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.99.1
   _DRY_RUN: "false"
   _FORCE: "false"
   _CF_ACCOUNT_ID: ""

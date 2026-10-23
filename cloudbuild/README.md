@@ -39,7 +39,7 @@ layout.
 
 | Config | Replaces (GitHub Actions) | Notes |
 |---|---|---|
-| `Dockerfile.ci` | &mdash; | Baked toolchain: rust 1.95.0, protoc 31.0, native deps, nextest/sccache/deny/audit/llvm-cov/geiger@0.13.0. Tag `:rust-1.95.0`. |
+| `Dockerfile.ci` | &mdash; | Baked toolchain: rust 1.99.1, protoc 31.0, native deps, nextest/sccache/deny/audit/llvm-cov/geiger@0.13.0. Tag `:rust-1.99.1`. |
 | `builder.yaml` | &mdash; | Builds and pushes `Dockerfile.ci` to GAR. |
 | `ci.yaml` | `rust.yml` build-and-test (Linux) and `msrv` | Main gates (60-minute step): fmt → clippy → build → signers → nextest → doctests → version contract → enc-transport → msrv/wasm checks. Required serial ignored-test step follows (50 minutes); overall build limit is 120 minutes. |
 | `codegen.yaml` | `rust.yml` codegen-fresh | `scripts/check-generated-fresh.sh` (needs git and wasm32), then `buf lint` and `buf breaking` against every module in the repo-root `buf.yaml` (`buf` downloaded at run time, not baked into the image). |
@@ -146,7 +146,7 @@ stores a Codecov token, and creates the triggers. It is idempotent.
 ## Rebuilding the CI image
 
 Re-run `builder.yaml` whenever `Dockerfile.ci` or `rust/rust-toolchain.toml`
-changes, and bump the `:rust-1.95.0` tag in lockstep across `Dockerfile.ci`,
+changes, and bump the `:rust-1.99.1` tag in lockstep across `Dockerfile.ci`,
 `builder.yaml`, every consuming config's `_CI_IMAGE` default, and the setup
 script:
 
@@ -158,7 +158,7 @@ gcloud builds submit . --region=us-east4 --config=cloudbuild/builder.yaml
 
 ```bash
 gcloud builds submit . --region=us-east4 --config=cloudbuild/ci.yaml \
-  --substitutions=_CI_IMAGE=us-east4-docker.pkg.dev/<project>/docker/mkit-ci:rust-1.95.0
+  --substitutions=_CI_IMAGE=us-east4-docker.pkg.dev/<project>/docker/mkit-ci:rust-1.99.1
 ```
 
 `codegen.yaml` needs a git checkout (it diffs the worktree), so reproduce it via

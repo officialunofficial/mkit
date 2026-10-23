@@ -2,7 +2,7 @@
 
 import { useAuth } from './auth-provider'
 
-/** Every surface shares the same ceremony, status, and server session. */
+/** Every surface shares the same ceremony, status, and local identity. */
 export function useIdentityActions() {
   return useAuth()
 }

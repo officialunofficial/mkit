@@ -45,7 +45,7 @@ fn mirror_push_prints_policy_warning_once_per_branch() {
     repo.ok(&["remote", "add", "origin", &endpoint]);
 
     let out = repo.ok_env(&["push", "origin", "--all"], INVALID_DEPTH);
-    assert!(out.stdout.is_empty());
+    assert_eq!(out.stdout, [] as [u8; 0]);
     assert_eq!(
         out.stderr,
         format!("{WARNING}{WARNING}pushed 2 ref(s) to origin ({endpoint})\n").as_bytes()

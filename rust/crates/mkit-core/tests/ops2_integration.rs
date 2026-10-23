@@ -302,7 +302,10 @@ fn stash_save_pop_roundtrip_restores_dirty_changes() {
         b"modified content"
     );
     let list_after = stash::list(&layout).unwrap();
-    assert!(list_after.entries.is_empty());
+    assert_eq!(
+        list_after.entries,
+        [] as [mkit_core::ops::stash::StashEntry; 0]
+    );
 }
 
 #[test]
@@ -325,7 +328,7 @@ fn stash_drop_removes_without_applying() {
 
     stash::drop(&layout, 0).unwrap();
     let list = stash::list(&layout).unwrap();
-    assert!(list.entries.is_empty());
+    assert_eq!(list.entries, [] as [mkit_core::ops::stash::StashEntry; 0]);
     // Worktree is at HEAD's tree (the save reset it before drop ran).
     assert_eq!(fs::read(repo.join("hello.txt")).unwrap(), b"original");
 }

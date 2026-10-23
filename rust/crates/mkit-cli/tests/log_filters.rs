@@ -76,7 +76,10 @@ fn author_filters_by_substring_against_both_identity_forms() {
         subjects(&repo, &["--author", "Bob"]),
         vec!["bob: widget fix"]
     );
-    assert!(subjects(&repo, &["--author", "Nobody"]).is_empty());
+    assert_eq!(
+        subjects(&repo, &["--author", "Nobody"]),
+        [] as [std::string::String; 0]
+    );
 }
 
 #[test]
@@ -90,7 +93,10 @@ fn grep_filters_by_message_substring() {
         subjects(&repo, &["--grep", "gadget"]),
         vec!["alice: gadget tweak"]
     );
-    assert!(subjects(&repo, &["--grep", "nonexistent"]).is_empty());
+    assert_eq!(
+        subjects(&repo, &["--grep", "nonexistent"]),
+        [] as [std::string::String; 0]
+    );
 }
 
 #[test]

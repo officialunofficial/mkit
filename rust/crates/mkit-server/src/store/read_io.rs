@@ -130,7 +130,7 @@ impl ReadCredits {
     pub fn paid(&self) -> bool {
         self.consume(|c| {
             c.left
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                 .is_ok()
         })
     }
@@ -173,7 +173,7 @@ impl ReadIo {
     pub(crate) fn paid_bytes(&self, bytes: u64) -> bool {
         self.credits.consume(|c| {
             c.encoded
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(bytes))
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(bytes))
                 .is_ok()
         })
     }

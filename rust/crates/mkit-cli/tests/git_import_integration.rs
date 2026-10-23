@@ -176,7 +176,7 @@ fn audit_rejects_unrelated_head_attestation() {
     let head = refs::read_ref(&layout, "main").unwrap().unwrap();
     let tag = refs::read_tag(&layout, "v1").unwrap().unwrap();
     let unrelated = mkit_attest::store::list(&layout, &tag).unwrap();
-    assert!(!unrelated.is_empty());
+    assert_ne!(unrelated, [] as [std::path::PathBuf; 0]);
     let head_dir = layout.attestations_dir().join(mkit_core::to_hex(&head));
     std::fs::remove_dir_all(&head_dir).unwrap();
     std::fs::create_dir(&head_dir).unwrap();

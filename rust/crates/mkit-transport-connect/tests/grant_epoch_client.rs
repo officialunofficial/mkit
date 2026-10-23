@@ -112,7 +112,7 @@ fn spawn(
                                 .push(req.signed_statement.clone().unwrap_or_default());
                             let pending = set
                                 .epoch_pending
-                                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                                     n.checked_sub(1)
                                 })
                                 .is_ok();

@@ -14,7 +14,7 @@
 # (see the final report for the glob list).
 
 substitutions:
-  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.99.1
 
 options:
   # The trigger runs this config as a dedicated service account. Cloud Build

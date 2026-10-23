@@ -349,7 +349,7 @@ fn render_porcelain_v2(
 
     let mut stdout = std::io::stdout().lock();
     for (xy, path, old_path) in combine_porcelain(entries) {
-        if xy == [b'?', b'?'] {
+        if xy == *b"??" {
             emit_v2_record(&mut stdout, "? ", path, z);
             continue;
         }
@@ -492,7 +492,7 @@ fn combine_porcelain(entries: &[StatusEntry]) -> Vec<([u8; 2], &str, Option<&str
         let c = porcelain_code(e.staging, e.diff.kind).as_bytes();
         let slot = tracked.entry(&e.diff.path).or_insert_with(|| {
             tracked_order.push(&e.diff.path);
-            ([b' ', b' '], None)
+            (*b"  ", None)
         });
         // Fill each column from whichever entry sets it (non-space wins).
         if c[0] != b' ' {
@@ -514,7 +514,7 @@ fn combine_porcelain(entries: &[StatusEntry]) -> Vec<([u8; 2], &str, Option<&str
             (s.0, p, s.1)
         })
         .collect();
-    out.extend(untracked.into_iter().map(|p| ([b'?', b'?'], p, None)));
+    out.extend(untracked.into_iter().map(|p| (*b"??", p, None)));
     out
 }
 

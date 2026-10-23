@@ -71,7 +71,7 @@ impl Graph {
 impl InPackObjectView for Graph {
     fn object_set_root(&self) -> Hash {
         let mut bytes = [0; 8];
-        for (out, source) in bytes.chunks_exact_mut(2).zip(self.targets) {
+        for (out, source) in bytes.as_chunks_mut::<2>().0.iter_mut().zip(self.targets) {
             out.copy_from_slice(&source);
         }
         hash(&bytes)
@@ -265,7 +265,7 @@ fn run(data: &[u8]) -> (Outcome, Counts) {
                     ClosureRequest::Membership(request) => {
                         counts.membership_requests += 1;
                         counts.member_ids += request.objects.len() as u64;
-                        assert!(!request.objects.is_empty());
+                        assert_ne!(request.objects, [] as [[u8; 32]; 0]);
                         assert!(request.objects.len() <= 4);
                         let mut answers = Vec::with_capacity(request.objects.len());
                         for object in &request.objects {

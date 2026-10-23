@@ -1,4 +1,4 @@
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
 
@@ -338,7 +338,7 @@ async fn observer_sink_failure_does_not_replace_original_result() {
         .unwrap();
     assert_eq!(reply.body.as_ref(), b"ok");
     server.join().unwrap();
-    assert!(std::fs::read(trace.path()).unwrap().is_empty());
+    assert_eq!(std::fs::read(trace.path()).unwrap(), [] as [u8; 0]);
 }
 
 #[test]

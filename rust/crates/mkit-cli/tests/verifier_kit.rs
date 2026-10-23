@@ -312,7 +312,7 @@ fn closure_missing_or_corrupt_pack() {
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "pack"))
         .collect();
-    assert!(!packs.is_empty());
+    assert_ne!(packs, [] as [std::path::PathBuf; 0]);
     fs::remove_file(&packs[0]).unwrap();
     let out = repo.run(&["closure", "verify", &commit, "--from", "c.closure"]);
     assert_eq!(out.status.code(), Some(66));

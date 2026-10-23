@@ -164,7 +164,9 @@ fn shared_auth_vectors_match_reference_signer_fingerprint_and_time() {
             || {
                 fixture["body_hex"].as_str().map_or_else(Vec::new, |hex| {
                     hex.as_bytes()
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|pair| {
                             u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()
                         })

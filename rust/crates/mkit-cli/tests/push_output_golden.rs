@@ -15,13 +15,13 @@ fn push_output_stays_byte_identical() {
     repo.ok(&["remote", "add", "origin", &endpoint]);
 
     let first = repo.ok(&["push", "origin"]);
-    assert!(first.stdout.is_empty());
+    assert_eq!(first.stdout, [] as [u8; 0]);
     assert_eq!(
         first.stderr,
         format!("To {endpoint}\n * [new branch]      main -> main\n").as_bytes()
     );
     let no_op = repo.ok(&["push"]);
-    assert!(no_op.stdout.is_empty());
+    assert_eq!(no_op.stdout, [] as [u8; 0]);
     assert_eq!(no_op.stderr, b"Everything up-to-date\n");
 
     let layout = RepoLayout::single(repo.path());
@@ -29,7 +29,7 @@ fn push_output_stays_byte_identical() {
     repo.commit_file("file.txt", b"second\n", "second");
     let new = to_hex(&refs::read_ref(&layout, "main").unwrap().unwrap());
     let append = repo.ok(&["push"]);
-    assert!(append.stdout.is_empty());
+    assert_eq!(append.stdout, [] as [u8; 0]);
     assert_eq!(
         append.stderr,
         format!(

@@ -27,7 +27,7 @@ struct Budget {
 impl Budget {
     fn reserve(&self, bytes: usize) -> TransportResult<()> {
         self.used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(bytes).filter(|&next| next <= self.limit)
             })
             .map(|_| ())

@@ -32,7 +32,7 @@
 # publish step is idempotent: an identical published version is skipped.
 
 substitutions:
-  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.99.1
   _DRY_RUN: "false"
   _VERIFY_TAG: "true"
   _GPG_FINGERPRINTS: ""

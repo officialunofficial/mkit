@@ -1,14 +1,6 @@
 'use client'
 
-import {
-  CodeIcon,
-  FlaskIcon,
-  GaugeIcon,
-  GitDiffIcon,
-  HouseIcon,
-  ScrollIcon,
-  UsersThreeIcon,
-} from '@phosphor-icons/react/ssr'
+import { FlaskIcon, GaugeIcon, GitDiffIcon, HouseIcon, ScrollIcon, UsersThreeIcon } from '@phosphor-icons/react/ssr'
 import type { ComponentType } from 'react'
 import { Link, useRouter } from 'waku'
 
@@ -16,13 +8,12 @@ import { Link, useRouter } from 'waku'
 // a label. Reordering the site nav is editing this list — nothing else.
 type NavGroup = 'Learn' | 'Reference'
 
-type NavRoute = '/' | '/create' | '/concepts' | '/performance' | '/parity' | '/specs' | '/multiplayer'
+type NavRoute = '/' | '/concepts' | '/performance' | '/parity' | '/specs' | '/multiplayer'
 
 type IconComponent = ComponentType<{ size?: number; weight?: 'regular' | 'fill'; 'aria-hidden'?: boolean }>
 
 const NAV_LINKS: ReadonlyArray<{ to: NavRoute; label: string; Icon: IconComponent; group: NavGroup }> = [
   { to: '/', label: 'Overview', group: 'Learn', Icon: HouseIcon },
-  { to: '/create', label: 'Create', group: 'Learn', Icon: CodeIcon },
   { to: '/concepts', label: 'Concepts', group: 'Learn', Icon: FlaskIcon },
   { to: '/performance', label: 'Performance', group: 'Reference', Icon: GaugeIcon },
   { to: '/parity', label: 'Parity', group: 'Reference', Icon: GitDiffIcon },

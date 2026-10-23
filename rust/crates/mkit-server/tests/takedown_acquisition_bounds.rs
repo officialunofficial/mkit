@@ -776,12 +776,14 @@ unsafe impl GlobalAlloc for CountAlloc {
         // SAFETY: the prefix is an aligned u64, disjoint from the user region.
         unsafe { base.cast::<u64>().write(owner) };
         add(owner, layout.size());
+        // SAFETY: offset is within the combined allocation, past the u64 prefix.
         unsafe { base.add(offset) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         // SAFETY: alloc honors layout; only the valid user region is zeroed.
         let ptr = unsafe { self.alloc(layout) };
         if !ptr.is_null() {
+            // SAFETY: ptr addresses layout.size() valid bytes returned by alloc above.
             unsafe { ptr.write_bytes(0, layout.size()) };
         }
         ptr
@@ -792,6 +794,7 @@ unsafe impl GlobalAlloc for CountAlloc {
         };
         // SAFETY: ptr came from alloc with this exact layout and prefix offset.
         let base = unsafe { ptr.sub(offset) };
+        // SAFETY: base is the aligned u64 prefix written by alloc.
         let owner = unsafe { base.cast::<u64>().read() };
         if owner != 0 && owner == epoch() {
             let _ = STATS.try_with(|state| {
@@ -811,7 +814,9 @@ unsafe impl GlobalAlloc for CountAlloc {
         // Both buffers count at peak, conservatively covering a moving realloc.
         let next = unsafe { self.alloc(new) };
         if !next.is_null() {
+            // SAFETY: both buffers are valid for the copied length and do not overlap.
             unsafe { std::ptr::copy_nonoverlapping(ptr, next, old.size().min(size)) };
+            // SAFETY: ptr and old are the caller's original allocation and layout.
             unsafe { self.dealloc(ptr, old) };
         }
         next

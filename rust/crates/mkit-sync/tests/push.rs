@@ -543,7 +543,7 @@ fn multipart_receipts_resume_across_fresh_clients_and_both_backends() {
         );
         let first_receipt = receipts.saved.lock().unwrap()[0].clone();
         assert_eq!(first_receipt.1.index, 0);
-        assert!(!first_receipt.1.receipt.is_empty());
+        assert_ne!(first_receipt.1.receipt, [] as [u8; 0]);
         let resumed_backend = match backend {
             Backend::Transport => Backend::Client,
             Backend::Client => Backend::Transport,

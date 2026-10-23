@@ -2,13 +2,13 @@
 # Built by cloudbuild/builder-nightly.yaml. Consumed by nightly-fuzz.yaml,
 # nightly-formal.yaml, and nightly-bench.yaml.
 #
-# It extends the baked CI image (stable Rust 1.95.0, nextest, sccache, just,
+# It extends the baked CI image (stable Rust 1.99.1, nextest, sccache, just,
 # node 22, cargo-mutants) and adds:
 #   - nightly Rust and cargo-fuzz (fuzz.yml)
 #   - Java 21, Quint, elan (formal.yml; Apalache and Lean download at run time)
 #   - Kani (formal.yml kani job)
 # Pins match .github/workflows/formal.yml and the justfile formal_* variables.
-ARG BASE_IMAGE=us-east4-docker.pkg.dev/official-unofficial/docker/mkit-ci:rust-1.95.0
+ARG BASE_IMAGE=us-east4-docker.pkg.dev/official-unofficial/docker/mkit-ci:rust-1.99.1
 FROM ${BASE_IMAGE}
 
 # Cloud Build sets HOME to /builder/home for every step. Keep tool state in

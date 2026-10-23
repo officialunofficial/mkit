@@ -49,7 +49,7 @@ impl BlobStore for PrologueReads {
     fn reserve_read_calls(&self, calls: u32) -> Result<Option<ReadReservation>, StoreError> {
         // The tight-budget fallback must never attempt a speculative reservation.
         self.remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
                 left.checked_sub(calls)
             })
             .expect("implicit prologue attempted an unaffordable reservation");

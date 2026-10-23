@@ -1026,8 +1026,8 @@ fn packmap_driver_capture_matrix() {
             .map(|request| proto::AdvanceRefsRequest::decode_from_slice(request.body()).unwrap())
             .collect();
         if label == "full" {
-            assert!(uploads.is_empty());
-            assert!(moves.is_empty());
+            assert_eq!(uploads, [] as [([u8; 32], std::vec::Vec<u8>); 0]);
+            assert_eq!(moves, [] as [mkit_client::proto::AdvanceRefsRequest; 0]);
             let update = sent
                 .iter()
                 .find(|request| method(request) == "UpdateRef")
