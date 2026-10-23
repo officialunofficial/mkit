@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # repeat it rather than assume another decoder version has the same behavior.
 # https://github.com/facebook/zstd/blob/v1.5.7/lib/decompress/zstd_decompress.c
 # https://github.com/facebook/zstd/blob/v1.5.7/lib/decompress/zstd_decompress_block.c
-EXPECTED_VERSION = "2.1.0+zstd.1.5.7"
+EXPECTED_VERSION = "2.1.2+zstd.1.5.7"
 ALLOWANCE = 28 << 20
 
 

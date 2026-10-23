@@ -39,6 +39,8 @@ fn add(size: usize) {
 }
 
 #[allow(clippy::cast_ptr_alignment)] // System allocates the base at max(layout, Header) alignment.
+// SAFETY: Every method forwards to `System` with a layout that grows the
+// request by a header. `dealloc` rebuilds that same layout from the header.
 unsafe impl GlobalAlloc for Meter {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let offset = size_of::<Header>().div_ceil(layout.align()) * layout.align();
@@ -49,11 +51,14 @@ unsafe impl GlobalAlloc for Meter {
         let Ok(whole) = Layout::from_size_align(size, align) else {
             return ptr::null_mut();
         };
+        // SAFETY: `whole` has a non-zero size because it includes the header.
         let base = unsafe { System.alloc(whole) };
         if base.is_null() {
             return base;
         }
         let counted = !EXCLUDED.try_with(Cell::get).unwrap_or(false);
+        // SAFETY: `base` is non-null and aligned to `align`, which is at least
+        // the header alignment. It spans at least one `Header`.
         unsafe {
             base.cast::<Header>().write(Header {
                 size: layout.size(),
@@ -65,6 +70,7 @@ unsafe impl GlobalAlloc for Meter {
         if counted {
             add(layout.size());
         }
+        // SAFETY: `offset` is within the `whole` allocation made above.
         unsafe { base.add(offset) }
     }
 
@@ -76,13 +82,18 @@ unsafe impl GlobalAlloc for Meter {
         // immediately before the returned pointer's alignment padding.
         // Header location is recovered from the original layout alignment.
         let offset = size_of::<Header>().div_ceil(layout.align()) * layout.align();
+        // SAFETY: `ptr` came from `alloc`, which returned `base + offset` for
+        // the same layout alignment.
         let base = unsafe { ptr.sub(offset) };
+        // SAFETY: `alloc` wrote a `Header` at `base` and nothing overwrites it.
         let header = unsafe { base.cast::<Header>().read() };
         if header.counted {
             LIVE.fetch_sub(header.size, Ordering::Relaxed);
         }
+        // SAFETY: These values already formed a valid layout in `alloc`.
         let whole =
             unsafe { Layout::from_size_align_unchecked(header.offset + header.size, header.align) };
+        // SAFETY: `base` and `whole` match the original `System.alloc` call.
         unsafe {
             System.dealloc(base, whole);
         }
@@ -92,8 +103,11 @@ unsafe impl GlobalAlloc for Meter {
         let Ok(next_layout) = Layout::from_size_align(size, layout.align()) else {
             return ptr::null_mut();
         };
+        // SAFETY: `next_layout` is valid. The caller supplies a valid `layout`.
         let next = unsafe { self.alloc(next_layout) };
         if !next.is_null() {
+            // SAFETY: Both blocks hold at least the copied length. They are
+            // distinct allocations. `ptr` came from this allocator.
             unsafe {
                 ptr::copy_nonoverlapping(ptr, next, layout.size().min(size));
                 self.dealloc(ptr, layout);

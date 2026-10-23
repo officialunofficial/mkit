@@ -230,6 +230,7 @@ smallvec
 smoothutf8
 socket2
 spki
+sponge-cursor
 stable_deref_trait
 strobe-rs
 subtle
