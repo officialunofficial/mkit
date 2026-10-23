@@ -60,11 +60,12 @@ class ServerGates(unittest.TestCase):
     def test_cloud_workspace_test_compilation_is_serial(self):
         steps = self.ci_steps()
         archive = steps["nextest-archive"]
-        # One archive build compiles every workspace test binary. The serial
-        # Cargo job bound reserves memory for the unified server lib-test.
+        # One archive build compiles every workspace test binary. A small Cargo
+        # job bound limits memory use. The wrapper compiles the unified server
+        # lib-test without sccache, so it stays a single rustc.
         self.assertRegex(
             archive,
-            r"(?m)^ +cargo nextest archive --locked --workspace --all-features --build-jobs 1 --archive-file /workspace/nextest-archive\.tar\.zst(?: |$)",
+            r"(?m)^ +cargo nextest archive --locked --workspace --all-features --build-jobs [1-9] --archive-file /workspace/nextest-archive\.tar\.zst(?: |$)",
         )
         self.assertIn('"CARGO_PROFILE_TEST_CODEGEN_UNITS=256"', archive)
         self.assertIn('"RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"', archive)

@@ -359,7 +359,7 @@ steps:
         set -euo pipefail
         cd rust
         status=0
-        cargo nextest archive --locked --workspace --all-features --build-jobs 1 --archive-file /workspace/nextest-archive.tar.zst || status=1
+        cargo nextest archive --locked --workspace --all-features --build-jobs 4 --archive-file /workspace/nextest-archive.tar.zst || status=1
         sccache --show-stats
         exit "$status"
 
