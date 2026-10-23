@@ -127,6 +127,9 @@ unwrap_used = "deny"
 # A stray `dbg!()` left in shipped code spams stderr and leaks internals.
 # It's only ever a debugging aid, so fail the build rather than warn.
 dbg_macro = "deny"
+undocumented_unsafe_blocks = "warn"
+wildcard_imports = "warn"
+todo = "warn"
 
 [profile.release]
 codegen-units = 1
