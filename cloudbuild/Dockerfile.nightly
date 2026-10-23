@@ -54,3 +54,13 @@ ARG KANI_VERSION=0.68.0
 RUN cargo install --locked kani-verifier --version "${KANI_VERSION}" \
     && cargo kani setup \
     && rm -rf "${CARGO_HOME:-/usr/local/cargo}/registry"
+
+# Newer glibc. The base image is Debian bookworm (glibc 2.36). The Quint Rust
+# evaluator, downloaded on first use, needs glibc 2.39 or newer. Pull libc6
+# from Debian trixie only, so the rest of the image stays on bookworm.
+RUN echo 'deb http://deb.debian.org/debian trixie main' > /etc/apt/sources.list.d/trixie.list \
+    && printf 'Package: *\nPin: release n=trixie\nPin-Priority: 100\n' > /etc/apt/preferences.d/trixie \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends -t trixie libc6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ldd --version | head -1
