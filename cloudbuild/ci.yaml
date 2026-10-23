@@ -1,6 +1,7 @@
 # Rust workspace CI on Cloud Build — replaces the Linux leg of the
-# `build-and-test` + `msrv` jobs in .github/workflows/rust.yml. Failure-ordered,
-# sequential main and ignored-test steps, both required for the build to pass.
+# `build-and-test` + `msrv` jobs in .github/workflows/rust.yml. The old serial
+# `check` step is now independent steps that run in parallel on one VM (see
+# "STEP GRAPH" below). Every step must pass for the build to pass.
 #
 # NOTE: mkit's Rust workspace lives in `rust/`, and the reference signers are a
 # SEPARATE workspace in `contrib/signers/`. Steps cd into the right tree; this
@@ -14,6 +15,18 @@
 #   - mkit-ci-pr    PRs, gated on a maintainer `/gcbrun` comment (the analog of
 #                   rust.yml's approval-gated heavy jobs). Cloud Build checks out
 #                   the PR head, so no SHA juggling is needed here.
+#
+# STEP GRAPH (all steps share one E2_HIGHCPU_32 VM and the /workspace volume):
+#   primitives, lint, signers, apps-workers, indexed, tests-misc, release-cli,
+#   wasm-gates, server-allocator, server-gates, nextest-archive   start at once
+#   nextest-1..3   wait for nextest-archive and signers
+#   ignored-lane   waits for nextest-archive
+# nextest-archive builds all workspace test binaries once with
+# `cargo nextest archive`. The partitions and the ignored lane run from it.
+# Each compiling step has its own CARGO_TARGET_DIR, so no Cargo lock couples
+# them. The two exceptions keep the default target directory on /workspace:
+# signers (the mkit-cli attest tests need contrib/signers/target) and
+# nextest-archive (the archived binaries run from that path).
 #
 # CACHING: sccache with a GCS backend. On Cloud Build the build runs *as* a
 # service account, so sccache reaches the bucket through the metadata server
@@ -34,21 +47,21 @@ options:
   # default Cloud Build account. Cloud Build rejects a custom account with no
   # log option.
   logging: CLOUD_LOGGING_ONLY
-  # 8 vCPUs keeps clippy+nextest brisk; 100 GB removes the disk pressure that
-  # made rust.yml free the Android/.NET/Haskell trees on GitHub's ~14 GB runners.
-  machineType: E2_HIGHCPU_8
-  diskSizeGb: 100
+  # 32 vCPUs and 32 GB run the parallel steps at the same time (the same
+  # machine as cloudbuild/server.yaml). 300 GB holds the separate target
+  # directories and the nextest archive, and removes the disk pressure that made
+  # rust.yml free the Android/.NET/Haskell trees on GitHub's ~14 GB runners.
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 300
   # _CACHE_BUCKET / _CI_IMAGE embed the built-in ${PROJECT_ID}; resolving a
   # built-in nested in a substitution value needs dynamic substitutions (auto-on
   # under triggers, off for a manual `gcloud builds submit` repro).
   dynamicSubstitutions: true
 
-# The workspace grew from 3,218 to 6,780 tests: nextest rose from 88s to
-# 499s, and test compilation from 63s to 209s. The old 40-minute build cap
-# expired during the serial ignored lane, before later main-lane gates ran.
-# Allow 60 minutes for the main step and 50 for the ignored lane, plus
-# ten minutes for source/image setup. Both steps must pass; no tests move out
-# of this required build.
+# The workspace has 7,500 tests. The old serial `check` step took 60-75 minutes
+# and the ignored lane another 10. Now the longest chain is nextest-archive
+# (about 25 minutes) then the partitions. The 7200s cap stays as headroom for a
+# cold sccache cache; each step has its own timeout.
 timeout: 7200s
 
 steps:
@@ -142,147 +155,160 @@ steps:
         bash scripts/check-primitives-stability.sh
         sccache --show-stats
 
+  # Lint and build gates for the rust/ workspace. This step is independent of
+  # the test steps. It uses its own target directory so no Cargo lock couples
+  # it to the archive step.
   - name: ${_CI_IMAGE}
-    id: check
-    waitFor: [primitives]
-    timeout: 5400s
+    id: lint
+    waitFor: ['-']
+    timeout: 2400s
     entrypoint: bash
     env:
       - "CARGO_TERM_COLOR=always"
-      - "CARGO_INCREMENTAL=0" # required: sccache can't cache incremental builds
+      - "CARGO_INCREMENTAL=0"
       - "RUST_BACKTRACE=short"
-      # Drop debuginfo in CI (dominant target/ bloat; CI never opens a debugger).
       - "CARGO_PROFILE_DEV_DEBUG=0"
       - "CARGO_PROFILE_TEST_DEBUG=0"
       - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
-      # sccache → GCS. RW mode + bucket; ADC comes from the build SA.
-      - "RUSTC_WRAPPER=/tmp/mkit-ci-rustc"
+      - "RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"
       - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
       - "SCCACHE_GCS_RW_MODE=READ_WRITE"
       - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_BUILD_JOBS=4"
+      - "CARGO_TARGET_DIR=/tmp/target-lint"
     args:
       - -c
       - |
         set -euo pipefail
-        # sccache replaces Cargo's jobserver, including for uncached binaries.
-        # Preserve the serial compiler bound for the linked server lib-test.
-        cat > /tmp/mkit-ci-rustc <<'SH'
-        #!/bin/bash
-        set -euo pipefail
-        if [[ " $* " == *" --crate-name mkit_server "* &&
-              " $* " == *" crates/mkit-server/src/lib.rs "* &&
-              " $* " == *" --test "* &&
-              " $* " == *" --emit=dep-info,link "* ]]; then
-          exec "$@"
-        fi
-        # Cargo's JSON renderer drops raw stdout, including sccache's signal
-        # diagnostics. Copy it to stderr on failure and preserve the exit code.
-        output=$(mktemp)
-        trap 'rm -f "$output"' EXIT
+        # Every gate runs even after an earlier failure. Each gate records into
+        # `failed`; the step exits non-zero at the end.
         status=0
-        sccache "$@" >"$output" || status=$?
-        cat "$output"
-        if [ "$status" -ne 0 ]; then
-          cat "$output" >&2
-        fi
+        ( cd rust || exit 1
+          failed=0
+          cargo fetch --locked || failed=1
+          cargo fmt --check || failed=1
+          python3 ../scripts/check-feature-names.py || failed=1
+          cargo clippy --all-targets --all-features --workspace -- -D warnings || failed=1
+          cargo build --locked --workspace || failed=1
+          # MSRV gate. The baked image is pinned to the MSRV, so a locked all-targets
+          # check is the rust.yml `msrv` job's equivalent. Fail if the image's rustc
+          # drifts from the declared rust-version (lowercase vars avoid the Cloud Build
+          # substitution scanner).
+          msrv=$(awk -F\" '/^[[:space:]]*rust-version[[:space:]]*=/ {print $2; exit}' Cargo.toml) || failed=1
+          rustc_v=$(rustc --version | awk '{print $2}') || failed=1
+          echo "declared MSRV=$msrv, image rustc=$rustc_v"
+          if [ -n "$msrv" ] && [ "$rustc_v" != "$msrv" ]; then
+            echo "MSRV drift: rust-version=$msrv but CI image rustc=$rustc_v — rebuild Dockerfile.ci or fix rust-version" >&2
+            failed=1
+          fi
+          cargo check --workspace --locked --all-targets || failed=1
+          exit "$failed"
+        ) || status=1
+        sccache --show-stats
         exit "$status"
-        SH
-        chmod +x /tmp/mkit-ci-rustc
 
-        # Every command after the workspace build + swtpm setup is attempted
-        # even after a failure (a `cd` into a missing tree aborts only its
-        # own subshell, via `|| exit 1`): each records into `status` — a
-        # failure is never turned into a success or skipped — and the step
-        # exits non-zero at the end, so one failing gate can no longer hide
-        # the rest of the results.
+  # contrib/signers is a separate workspace. The nextest partitions wait for
+  # the signers-bin step: mkit-cli's attest_roundtrip tests drive
+  # contrib/signers/target/debug/mkit-sign-file and only fall back to building
+  # it on the fly when it is missing. This step only builds the binary, so a
+  # fmt, clippy, or test failure in signers cannot skip the partitions. It
+  # keeps the default target directory (on the shared /workspace volume) so
+  # the partitions find the binary.
+  - name: ${_CI_IMAGE}
+    id: signers-bin
+    waitFor: ['-']
+    timeout: 1500s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUST_BACKTRACE=short"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
+      - "RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_BUILD_JOBS=4"
+      - "MKIT_TEST_STRICT=1"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd contrib/signers
+        cargo build --locked --all-features
+        sccache --show-stats
+
+  # The signers gates. No other step waits for this one. It starts after
+  # signers-bin so both share the warm default target directory.
+  - name: ${_CI_IMAGE}
+    id: signers
+    waitFor: [signers-bin]
+    timeout: 1500s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUST_BACKTRACE=short"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
+      - "RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_BUILD_JOBS=4"
+      - "MKIT_TEST_STRICT=1"
+    args:
+      - -c
+      - |
+        set -euo pipefail
         status=0
-
-        # ── rust/ workspace: fmt → clippy → build ───────────────────────────
-        ( cd rust
-          cargo fetch --locked
-          cargo fmt --check
-          python3 ../scripts/check-feature-names.py
-          cargo clippy --all-targets --all-features --workspace -- -D warnings
-          cargo build --locked --workspace
-        )
-
-        # ── contrib/signers (separate workspace) ────────────────────────────
-        # MUST run before the workspace nextest step: mkit-cli's attest_roundtrip
-        # tests drive contrib/signers/target/debug/mkit-sign-file and only fall
-        # back to building it on-the-fly when missing.
-        #
-        # TPM tests use disposable swtpm state, never the host's measured-boot
-        # /dev/tpm0. Wait for both simulator ports before initializing it below.
-        # Lowercase variables avoid Cloud Build's substitution scanner.
-        swtpm_state_dir=$(mktemp -d)
-        swtpm socket --tpmstate dir="$swtpm_state_dir" --tpm2 \
-          --server type=tcp,port=2321 --ctrl type=tcp,port=2322 \
-          --flags not-need-init &
-        swtpm_pid=$!
-        trap 'kill "$swtpm_pid" 2>/dev/null || true' EXIT
-        export TCTI="swtpm:host=localhost,port=2321"
-        # Wait for both swtpm ports to accept connections before poking them —
-        # the daemon above starts asynchronously.
-        for _ in $(seq 1 50); do
-          (exec 3<>/dev/tcp/localhost/2321) 2>/dev/null && (exec 3<>/dev/tcp/localhost/2322) 2>/dev/null && break
-          sleep 0.2
-        done
-
-        # A fresh swtpm instance is powered-on but not started — every TPM2
-        # command fails with TPM_RC_INITIALIZE until TPM2_Startup(CLEAR) runs
-        # once. No CLI tool for this is baked into the image (tpm2-tools isn't
-        # installed, only libtss2-dev), so send the fixed 12-byte command
-        # (TPM2 Part 3 §9.3, no session, no auth — deterministic wire bytes)
-        # directly to the command port and check for TPM_RC_SUCCESS:
-        #   tag=TPM_ST_NO_SESSIONS(0x8001) size=12 code=TPM2_Startup(0x144)
-        #   body=TPM_SU_CLEAR(0x0000)
-        exec 4<>/dev/tcp/localhost/2321
-        printf '\x80\x01\x00\x00\x00\x0c\x00\x00\x01\x44\x00\x00' >&4
-        startup_resp=$(head -c 10 <&4 | od -An -tx1 | tr -d ' \n')
-        exec 4<&- 4>&-
-        echo "TPM2_Startup response bytes: $startup_resp"
-        if [ "${startup_resp: -8}" != "00000000" ]; then
-          echo "TPM2_Startup did not return TPM_RC_SUCCESS" >&2
-          exit 1
-        fi
-
-        # #505 PR 2/5: this Linux lane provisions both `git` (baked into
-        # _CI_IMAGE) and a real TPM path (swtpm, wired above), so tests that
-        # would otherwise silently `return` green when their tool/feature is
-        # missing must instead fail loudly here — a config regression that
-        # breaks one of those two must not report a green CI run.
-        export MKIT_TEST_STRICT=1
-
+        # Software TPM for the TPM tests; also exports TCTI and MKIT_TEST_STRICT=1.
+        source /workspace/scripts/ci-swtpm-setup.sh
         ( cd contrib/signers || exit 1
           failed=0
           cargo fmt --check || failed=1
           cargo clippy --locked --all-targets --all-features -- -D warnings || failed=1
-          cargo build --locked --all-features || failed=1
           cargo nextest run --locked --all-features --no-fail-fast || failed=1
           exit "$failed"
         ) || status=1
+        sccache --show-stats
+        exit "$status"
 
-        # ── apps/repo-worker, apps/keys-worker (separate standalone crates) ──
-        # Neither is a member of the rust/ workspace (each pins its own
-        # rust-toolchain.toml for the Cloudflare Workers Build image — see
-        # their Cargo.toml headers), so `cargo test --workspace` above never
-        # touches them. `cargo test` on the host target only compiles each
-        # crate's pure, non-wasm-gated modules (chat/envelope/hashing/refs/
-        # commit_log/audit for repo-worker; envelope/names/audit for
-        # keys-worker) — the Durable Object / `#[event(fetch)]` worker glue
-        # (repo-worker's `worker_impl`, all of keys-worker's `lib.rs`-level
-        # handlers) is exercised for COMPILATION only, via the wasm32 build,
-        # since it needs a live Workers runtime to actually run (see #695's
-        # audit.rs module docs). This is what catches "a regression that
-        # silently drops accepted/rejected-write logging" — the pure
-        # audit::WriteAudit derivation is unit-tested; the wasm32 build
-        # confirms the interceptor/handler wiring around it still compiles.
-        #
-        # `cargo fmt --check` / `cargo clippy -D warnings` are intentionally
-        # NOT gated here for repo-worker: its wasm32-only worker_impl module
-        # (predating #695) carries pre-existing fmt/clippy debt this issue
-        # didn't introduce, and gating on it now would fail CI for unrelated
-        # reasons. keys-worker has no such debt, so it gets the full sweep.
+  # apps/repo-worker and apps/keys-worker are standalone crates outside the
+  # rust/ workspace (each pins its own rust-toolchain.toml for the Cloudflare
+  # Workers Build image). `cargo test` on the host target compiles only the
+  # pure, non-wasm-gated modules. The wasm32 build compiles the Durable Object
+  # and `#[event(fetch)]` glue, which needs a live Workers runtime to run.
+  # repo-worker skips fmt and clippy: its wasm32-only worker_impl module has
+  # older fmt and clippy debt unrelated to its gates. keys-worker has none, so
+  # it gets the full sweep.
+  - name: ${_CI_IMAGE}
+    id: apps-workers
+    waitFor: ['-']
+    timeout: 1500s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUST_BACKTRACE=short"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
+      - "RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_BUILD_JOBS=2"
+      - "MKIT_TEST_STRICT=1"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        status=0
+        source /workspace/scripts/ci-swtpm-setup.sh
         ( cd apps/repo-worker || exit 1
           failed=0
           cargo fetch --locked || failed=1
@@ -299,26 +325,251 @@ steps:
           cargo build --locked --target wasm32-unknown-unknown || failed=1
           exit "$failed"
         ) || status=1
+        sccache --show-stats
+        exit "$status"
 
-        # ── rust/ workspace: tests ──────────────────────────────────────────
-        # The unified server lib-test needs Cargo's single-job jobserver;
-        # sccache substitutes CPU-count parallelism and exhausts memory.
-        # The wrapper above bypasses it only for that linked test target.
-        # Smaller codegen units and serial Cargo builds remain required.
-        # Test selection and execution concurrency are unchanged.
+  # Build every workspace test binary once. The partition steps and the
+  # ignored lane run from this archive, so none of them compiles. The unified
+  # server lib-test needs Cargo's single-job jobserver; sccache substitutes
+  # CPU-count parallelism and exhausts memory. The wrapper bypasses sccache
+  # only for that linked test target. Smaller codegen units and serial Cargo
+  # builds remain required. The archive lives on the shared /workspace volume,
+  # and so does the target directory that the archived binaries point to.
+  - name: ${_CI_IMAGE}
+    id: nextest-archive
+    waitFor: ['-']
+    timeout: 3000s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUST_BACKTRACE=short"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
+      - "RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        status=0
+        cargo nextest archive --locked --workspace --all-features --build-jobs 1 --archive-file /workspace/nextest-archive.tar.zst || status=1
+        sccache --show-stats
+        exit "$status"
+
+  # Workspace nextest, split into 3 partitions that run at the same time.
+  # Cloud Build steps share one VM, so each partition gets 9 test threads: 27
+  # threads leave 5 vCPUs for the serial ignored lane. The slowest conformance
+  # tests (about 300 s) set the floor for the whole stage. The swtpm setup and
+  # MKIT_TEST_STRICT=1 match the old single check step.
+  - name: ${_CI_IMAGE}
+    id: nextest-1
+    waitFor: [nextest-archive, signers-bin]
+    timeout: 2400s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUST_BACKTRACE=short"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
+      - "MKIT_TEST_STRICT=1"
+      - "NEXTEST_TEST_THREADS=9"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        status=0
+        source /workspace/scripts/ci-swtpm-setup.sh
+        cd rust
+        cargo nextest run --archive-file /workspace/nextest-archive.tar.zst --workspace-remap /workspace/rust \
+          --partition count:1/3 --no-fail-fast || status=1
+        exit "$status"
+
+  - name: ${_CI_IMAGE}
+    id: nextest-2
+    waitFor: [nextest-archive, signers-bin]
+    timeout: 2400s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUST_BACKTRACE=short"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
+      - "MKIT_TEST_STRICT=1"
+      - "NEXTEST_TEST_THREADS=9"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        status=0
+        source /workspace/scripts/ci-swtpm-setup.sh
+        cd rust
+        cargo nextest run --archive-file /workspace/nextest-archive.tar.zst --workspace-remap /workspace/rust \
+          --partition count:2/3 --no-fail-fast || status=1
+        exit "$status"
+
+  - name: ${_CI_IMAGE}
+    id: nextest-3
+    waitFor: [nextest-archive, signers-bin]
+    timeout: 2400s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUST_BACKTRACE=short"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
+      - "MKIT_TEST_STRICT=1"
+      - "NEXTEST_TEST_THREADS=9"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        status=0
+        source /workspace/scripts/ci-swtpm-setup.sh
+        cd rust
+        cargo nextest run --archive-file /workspace/nextest-archive.tar.zst --workspace-remap /workspace/rust \
+          --partition count:3/3 --no-fail-fast || status=1
+        exit "$status"
+
+  # Serial ignored-test lane (the nextest `ignored-lane` profile, test-threads
+  # = 1). The 75,000-ref D34 listing has an 1800s test ceiling; 3000s also
+  # covers the 300s pack-residency test and the other real-I/O tests. It runs
+  # from the same archive as the partitions, so it needs no compile.
+  - name: ${_CI_IMAGE}
+    id: ignored-lane
+    waitFor: [nextest-archive]
+    timeout: 3000s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUST_BACKTRACE=short"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
+      - "MKIT_TEST_STRICT=1"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        status=0
+        cargo nextest run --archive-file /workspace/nextest-archive.tar.zst --workspace-remap /workspace/rust \
+          --no-fail-fast --profile ignored-lane --run-ignored ignored-only || status=1
+        exit "$status"
+
+  # Indexed verification with one Extract step per slice (default chains).
+  # A -p mkit-server build unifies features differently from the workspace
+  # archive, so this step compiles its own test binaries.
+  - name: ${_CI_IMAGE}
+    id: indexed
+    waitFor: ['-']
+    timeout: 2400s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUST_BACKTRACE=short"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
+      - "RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_BUILD_JOBS=4"
+      - "CARGO_TARGET_DIR=/tmp/target-indexed"
+      - "MKIT_TEST_STRICT=1"
+      - "MKIT_TEST_EXTRACT_CHAIN=1"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        status=0
+        source /workspace/scripts/ci-swtpm-setup.sh
+        cd rust
+        cargo nextest run --locked -p mkit-server --all-features --no-fail-fast -E 'test(~indexed::)' || status=1
+        sccache --show-stats
+        exit "$status"
+
+  # nextest does not run doctests; gate them here. The fuzz manifest tests
+  # live in their own workspace.
+  - name: ${_CI_IMAGE}
+    id: tests-misc
+    waitFor: ['-']
+    timeout: 1500s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUST_BACKTRACE=short"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
+      - "RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_BUILD_JOBS=4"
+      - "CARGO_TARGET_DIR=/tmp/target-misc"
+      - "MKIT_TEST_STRICT=1"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        status=0
+        source /workspace/scripts/ci-swtpm-setup.sh
         ( cd rust || exit 1
           failed=0
-          cargo nextest run --locked --workspace --all-features --build-jobs 1 --no-fail-fast || failed=1
-          # Indexed verification with one Extract step per slice (default chains).
-          MKIT_TEST_EXTRACT_CHAIN=1 cargo nextest run --locked -p mkit-server --all-features --no-fail-fast -E 'test(~indexed::)' || failed=1
-
-          # nextest doesn't run doctests; gate them separately.
           cargo test --manifest-path fuzz/Cargo.toml --no-fail-fast || failed=1
           cargo test --locked --doc --workspace --no-fail-fast || failed=1
+          exit "$failed"
+        ) || status=1
+        sccache --show-stats
+        exit "$status"
 
+  # Release-profile gates. The release profile shares little with the dev
+  # builds, so this step has its own target directory.
+  - name: ${_CI_IMAGE}
+    id: release-cli
+    waitFor: ['-']
+    timeout: 2400s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUST_BACKTRACE=short"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
+      - "RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_BUILD_JOBS=4"
+      - "CARGO_TARGET_DIR=/tmp/target-release"
+      - "MKIT_TEST_STRICT=1"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        status=0
+        source /workspace/scripts/ci-swtpm-setup.sh
+        ( cd rust || exit 1
+          failed=0
           # Version contract: `mkit version` must print exactly "mkit <X.Y.Z>".
           cargo build --release --locked -p mkit-cli || failed=1
-          out=$(./target/release/mkit version) || failed=1
+          out=$(/tmp/target-release/release/mkit version) || failed=1
           expected="mkit $(awk -F\" '/^version/ {print $2; exit}' Cargo.toml)" || failed=1
           echo "stdout:   [$out]"
           echo "expected: [$expected]"
@@ -326,34 +577,45 @@ steps:
             echo "mkit version contract violated — stdout is not exactly 'mkit <X.Y.Z>'" >&2
             failed=1
           fi
-
           # enc-transport opt-in build + encrypted-transport e2e (issue #156).
           cargo build --locked -p mkit-cli --features enc-transport || failed=1
           cargo test --locked -p mkit-transport-enc --features tcp --no-fail-fast || failed=1
-
-          # MSRV gate. The baked image is pinned to the MSRV, so a locked
-          # all-targets check is the rust.yml `msrv` job's equivalent — but
-          # assert the coupling instead of trusting a comment: fail loudly if
-          # the image's rustc ever drifts from the declared rust-version (lower-
-          # case/digit vars below don't match Cloud Build's substitution pattern).
-          msrv=$(awk -F\" '/^[[:space:]]*rust-version[[:space:]]*=/ {print $2; exit}' Cargo.toml) || failed=1
-          rustc_v=$(rustc --version | awk '{print $2}') || failed=1
-          echo "declared MSRV=$msrv, image rustc=$rustc_v"
-          if [ -n "$msrv" ] && [ "$rustc_v" != "$msrv" ]; then
-            echo "MSRV drift: rust-version=$msrv but CI image rustc=$rustc_v — rebuild Dockerfile.ci or fix rust-version" >&2
-            failed=1
-          fi
-          cargo check --workspace --locked --all-targets || failed=1
           exit "$failed"
         ) || status=1
+        sccache --show-stats
+        exit "$status"
 
-        # ── mkit-server (server exit gate; `just ci-server`) ──
-        # The workspace nextest above runs the memory storage suite and
-        # wire suite over the memory-backed in-process host. These
-        # add what it cannot: the runtime-agnostic core must build for wasm32,
-        # the wasm32 graphs must stay free of C-toolchain crates, and the default `mkit` CLI must
-        # stay server-free (docs/INVARIANTS.md). The triggers run on main
-        # and PRs to main only (cloudbuild/README.md).
+  # mkit-server server exit gate (`just ci-server`). The workspace nextest runs
+  # the memory storage suite and the wire suite over the in-process host. These
+  # add what it cannot: the runtime-agnostic core must build for wasm32, the
+  # wasm32 graphs must stay free of C-toolchain crates, and the default `mkit`
+  # CLI must stay server-free (docs/INVARIANTS.md). cloudbuild/server.yaml also
+  # runs the mkit-client builds, check-wasm-dep-graph.sh and
+  # check-sync-native-deps.sh. The server trigger is path-gated, so this
+  # config keeps its own copy.
+  - name: ${_CI_IMAGE}
+    id: wasm-gates
+    waitFor: ['-']
+    timeout: 1500s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUST_BACKTRACE=short"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
+      - "RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_BUILD_JOBS=4"
+      - "CARGO_TARGET_DIR=/tmp/target-wasm"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        status=0
         ( cd rust || exit 1
           failed=0
           cargo build --locked -p mkit-client --target wasm32-unknown-unknown || failed=1
@@ -368,58 +630,33 @@ steps:
         bash scripts/check-wasm-dep-graph.sh || status=1
         bash scripts/check-cli-baseline.sh || status=1
         bash scripts/check-sync-native-deps.sh || status=1
-
-        sccache --show-stats
-        exit "$status"
-
-  # Run the same serial ignored-lane profile after the main gates. The
-  # 75,000-ref D34 listing has an 1800s test ceiling; 3000s also covers the
-  # 300s pack-residency test, the other real-I/O tests, and build headroom.
-  # /workspace retains the main step's target artifacts, with identical
-  # compilation flags, so this step does not need a second cold test build.
-  - name: ${_CI_IMAGE}
-    id: ignored-lane
-    waitFor: [check]
-    timeout: 3000s
-    entrypoint: bash
-    env:
-      - "CARGO_TERM_COLOR=always"
-      - "CARGO_INCREMENTAL=0"
-      - "RUST_BACKTRACE=short"
-      - "CARGO_PROFILE_DEV_DEBUG=0"
-      - "CARGO_PROFILE_TEST_DEBUG=0"
-      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
-      - "MKIT_TEST_STRICT=1"
-      - "RUSTC_WRAPPER=sccache"
-      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
-      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
-      - "SCCACHE_GCS_KEY_PREFIX=ci"
-    args:
-      - -c
-      - |
-        set -euo pipefail
-        cd rust
-        status=0
-        cargo nextest run --locked --workspace --all-features --build-jobs 1 \
-          --no-fail-fast --profile ignored-lane --run-ignored ignored-only || status=1
         sccache --show-stats
         exit "$status"
 
   # Separate cargo invocation keeps the C decoder out of the allocator probe.
+  # It has its own target directory, so it runs next to the other steps.
   - name: ${_CI_IMAGE}
     id: server-allocator
-    waitFor: [check]
-    timeout: 600s
+    waitFor: ['-']
+    timeout: 1500s
     entrypoint: bash
     env:
       - "CARGO_PROFILE_DEV_DEBUG=0"
       - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_INCREMENTAL=0"
+      - "CARGO_BUILD_JOBS=4"
+      - "RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_TARGET_DIR=/tmp/target-allocator"
     args:
       - -c
       - |
         set -euo pipefail
         cd rust
         cargo test --locked -p mkit-server --no-default-features --features memory,pack-ruzstd --test zstd_slice_heap_bounds -- --ignored --test-threads=1 --nocapture
+        sccache --show-stats
 
   - name: python:3.13.2-slim
     id: server-gates

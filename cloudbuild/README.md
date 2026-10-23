@@ -41,7 +41,7 @@ layout.
 |---|---|---|
 | `Dockerfile.ci` | &mdash; | Baked toolchain: rust 1.99.1, protoc 31.0, native deps, nextest/sccache/deny/audit/llvm-cov/geiger@0.13.0. Tag `:rust-1.99.1`. |
 | `builder.yaml` | &mdash; | Builds and pushes `Dockerfile.ci` to GAR. |
-| `ci.yaml` | `rust.yml` build-and-test (Linux) and `msrv` | Main gates (60-minute step): fmt → clippy → build → signers → nextest → doctests → version contract → enc-transport → msrv/wasm checks. Required serial ignored-test step follows (50 minutes); overall build limit is 120 minutes. |
+| `ci.yaml` | `rust.yml` build-and-test (Linux) and `msrv` | Parallel steps on one `E2_HIGHCPU_32` VM: `lint`, `signers`, `apps-workers`, `nextest-archive` then `nextest-1..3` and `ignored-lane`, `indexed`, `tests-misc`, `release-cli`, `wasm-gates`, plus `primitives`, `server-allocator`, `server-gates`. Every step must pass; overall build limit is 120 minutes. |
 | `codegen.yaml` | `rust.yml` codegen-fresh | `scripts/check-generated-fresh.sh` (needs git and wasm32), then `buf lint` and `buf breaking` against every module in the repo-root `buf.yaml` (`buf` downloaded at run time, not baked into the image). |
 | `security.yaml` | `rust-security.yml` | `cargo audit` (both workspaces) and `cargo deny`. |
 | `docs.yaml` | retired from GitHub Actions, Cloud Build only | rustdoc `-D warnings`, both workspaces. |
@@ -81,13 +81,14 @@ needs a maintainer **`/gcbrun`** only for external/fork PRs. See
 The workspace's unified `mkit-server` lib-test compiler is killed with signal 9
 near the worker's memory limit, even with one Cargo job and debuginfo disabled.
 `CARGO_PROFILE_TEST_CODEGEN_UNITS=256` splits LLVM code generation into smaller
-modules. Workspace nextest commands also use `--build-jobs 1` to reserve the
-remaining memory for that compiler. Both steps use identical profile settings
-to reuse compiled tests. Test selection and execution concurrency stay unchanged,
-including the required ignored-test lane. The machine type stays unchanged.
+modules. The `nextest-archive` step also uses `--build-jobs 1` to reserve the
+remaining memory for that compiler. It builds every workspace test binary once.
+The `nextest-1..3` partitions and the `ignored-lane` step run from the archive
+in `/workspace` and never compile. Test selection stays unchanged, including the
+required ignored-test lane. The machine type is `E2_HIGHCPU_32`.
 
 sccache replaces Cargo's jobserver with CPU-count parallelism even for
-uncached test binaries. The `check` step's compiler wrapper invokes rustc
+uncached test binaries. The compiler wrapper (`scripts/ci-rustc-wrapper.sh`) invokes rustc
 directly only for the linked `mkit-server` lib-test, preserving Cargo's
 single-job bound. Other compilations, including metadata checks, keep sccache.
 The lib-test binary was already uncacheable, so this bypass loses no cache hits.
@@ -102,8 +103,7 @@ same workspace feature graph and measure the Linux compiler's memory use.
 Every nextest invocation in `ci.yaml` runs with `--no-fail-fast`, overriding the
 default profile's `fail-fast = true` (`rust/.config/nextest.toml`), so one
 failing test reports the run's complete failure set instead of cancelling it.
-Inside the `check` step, each command after the workspace build and TPM setup
-still runs after an earlier failure (a `cd` into a missing tree aborts only
+Inside each `ci.yaml` step, each gate still runs after an earlier failure (a `cd` into a missing tree aborts only
 its own subshell, via `|| exit 1`): failures are recorded and the step exits
 non-zero at the end. Timeouts, retries and
 test selection stay at the default profile's values &mdash; the `ci` profile's
