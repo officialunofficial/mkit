@@ -67,6 +67,18 @@ describe('identity store', () => {
     expect(after.credentialId).toBe('cred-1') // keep so the player can re-derive
   })
 
+  it('signOut forgets the signed-in identity but keeps the credential', () => {
+    const s = useIdentityStore.getState()
+    s.setCredentialId('cred-1')
+    s.unlock({ seedHex: 'aa'.repeat(32), ed25519PubkeyHex: 'bb'.repeat(32) })
+    s.signOut()
+    const after = useIdentityStore.getState()
+    expect(after.seedHex).toBeNull()
+    expect(after.unlocked).toBe(false)
+    expect(after.knownPublicKey).toBeNull()
+    expect(after.credentialId).toBe('cred-1')
+  })
+
   it('ephemeral flag is carried through unlock', () => {
     useIdentityStore.getState().unlock({ seedHex: 'aa'.repeat(32), ed25519PubkeyHex: 'bb'.repeat(32), ephemeral: true })
     expect(useIdentityStore.getState().ephemeral).toBe(true)

@@ -195,13 +195,13 @@ async fn delayed_outcome_sink_is_driven_by_wakes_and_completes_within_tick_budge
         "pending I/O was polled without a wake"
     );
     let (start, end) = keys::class_range(keys::TAG_TIMER);
-    assert!(
+    assert_eq!(
         host.kv()
             .scan(&partition, &start, &end, None, 10)
             .await
             .unwrap()
-            .entries
-            .is_empty()
+            .entries,
+        [] as [(mkit_server::Key, mkit_server::Value); 0]
     );
     host.shutdown().await;
 }

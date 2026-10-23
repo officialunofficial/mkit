@@ -481,7 +481,10 @@ fn encoded_requests_equal_the_golden_requests() {
     let op = update_op();
     let authorize = map::authorize_request(&op, SERVER_ORIGIN);
     assert_eq!(value_of(&authorize), golden_value("authorize.request.json"));
-    assert!(authorize == decode::<pb::AuthorizeRequest>("authorize.request.json"));
+    assert_eq!(
+        authorize,
+        decode::<pb::AuthorizeRequest>("authorize.request.json")
+    );
 
     let op = begin_op();
     let creds = credentials();
@@ -492,7 +495,10 @@ fn encoded_requests_equal_the_golden_requests() {
         value_of(&first),
         golden_value("admit-first-attempt.request.json")
     );
-    assert!(first == decode::<pb::AdmitRequest>("admit-first-attempt.request.json"));
+    assert_eq!(
+        first,
+        decode::<pb::AdmitRequest>("admit-first-attempt.request.json")
+    );
 }
 
 #[test]
@@ -582,7 +588,10 @@ fn a_fork_carries_its_source_and_the_admission_its_charge() {
         value_of(&authorize),
         golden_value("authorize-fork.request.json")
     );
-    assert!(authorize == decode::<pb::AuthorizeRequest>("authorize-fork.request.json"));
+    assert_eq!(
+        authorize,
+        decode::<pb::AuthorizeRequest>("authorize-fork.request.json")
+    );
     let source = RepoId {
         namespace: NamespaceKey::from_stored(NAMESPACE.to_owned()),
         name: RepoName::new("origin").unwrap(),
@@ -595,7 +604,7 @@ fn a_fork_carries_its_source_and_the_admission_its_charge() {
     input.fork = Some(crate::pipeline::ForkAdmission::new(&source, 65_536));
     let admit = map::admit_request(&input, SERVER_ORIGIN);
     assert_eq!(value_of(&admit), golden_value("admit-fork.request.json"));
-    assert!(admit == decode::<pb::AdmitRequest>("admit-fork.request.json"));
+    assert_eq!(admit, decode::<pb::AdmitRequest>("admit-fork.request.json"));
     // Every other operation leaves both fields absent.
     let plain = map::authorize_request(&update_op(), SERVER_ORIGIN);
     assert!(value_of(&plain)["operation"].get("fork").is_none());
@@ -1242,7 +1251,7 @@ fn outcomes_ack_on_any_2xx_and_error_otherwise() {
 #[test]
 fn the_outcome_response_golden_acknowledges_and_an_oversize_2xx_still_does() {
     let empty: pb::OutcomeResponse = decode("outcome.response.json");
-    assert!(empty == pb::OutcomeResponse::default());
+    assert_eq!(empty, pb::OutcomeResponse::default());
     let golden = String::from_utf8(golden("outcome.response.json")).unwrap();
     let sink = |step| RemoteOutcomes::new(client(MockChannel::new(step), ManualSleep::new()));
     let row = outcome("r-1", OutcomeKind::Expired);

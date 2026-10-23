@@ -67,7 +67,7 @@ fn fixed_32(hex: &str) -> [u8; 32] {
 fn hex_decode(input: &str) -> Vec<u8> {
     assert!(input.len().is_multiple_of(2), "hex length");
     let mut out = Vec::with_capacity(input.len() / 2);
-    for chunk in input.as_bytes().chunks_exact(2) {
+    for chunk in input.as_bytes().as_chunks::<2>().0 {
         out.push((hex_value(chunk[0]) << 4) | hex_value(chunk[1]));
     }
     out

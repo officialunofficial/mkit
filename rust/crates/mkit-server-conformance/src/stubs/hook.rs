@@ -671,6 +671,6 @@ mod tests {
         let calls = hook.calls();
         assert_eq!(calls.len(), 1);
         assert!(!calls[0].verified);
-        assert!(calls[0].body.is_empty());
+        assert_eq!(calls[0].body, [] as [u8; 0]);
     }
 }

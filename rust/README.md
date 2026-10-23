@@ -4,7 +4,7 @@ This directory holds the `mkit` Cargo workspace.
 
 ## Toolchain
 
-- **Rust** `1.95.0` (pinned in `rust-toolchain.toml`)
+- **Rust** `1.99.1` (pinned in `rust-toolchain.toml`)
 - **Edition** `2024` (workspace default)
 - **Resolver** `3`
 

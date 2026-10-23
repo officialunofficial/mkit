@@ -6,7 +6,7 @@
 # SEPARATE workspace in `contrib/signers/`. Steps cd into the right tree; this
 # is the main difference from a root-workspace layout.
 #
-# Toolchain (Rust 1.95.0 + protoc + nextest + sccache + native deps) comes from
+# Toolchain (Rust 1.99.1 + protoc + nextest + sccache + native deps) comes from
 # the baked _CI_IMAGE (cloudbuild/Dockerfile.ci), so this config is just cargo.
 #
 # Triggers (see cloudbuild/README.md):
@@ -27,7 +27,7 @@
 
 substitutions:
   _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache
-  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.99.1
 
 options:
   # The trigger runs this config as a dedicated service account, not the

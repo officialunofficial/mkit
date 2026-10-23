@@ -114,7 +114,7 @@ sha2 = { version = "0.11", default-features = false }
 # §4, §4.1). Same `digest 0.11` line as `sha2`; its only other
 # dependency, `keccak 0.2`, is already in the graph via ed25519-dalek.
 # Never use `sha3::Sha3_256` for these values.
-sha3 = { version = "0.11", default-features = false, optional = true }
+sha3 = { version = "0.12", default-features = false, optional = true }
 # BLS12-381 threshold signing (feature `bls-threshold`). Pulls blst via
 # commonware-cryptography's `std` feature (which, since 2026.9.0, enables
 # the now-optional `bls12381` feature that gates `dep:blst` — `std` is

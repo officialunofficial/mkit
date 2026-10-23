@@ -2133,7 +2133,7 @@ impl<'a> ResidentBudget<'a> {
     fn charge(&self, len: usize) -> Result<Reservation<'_>, PackError> {
         let previous = self
             .used
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 used.checked_add(len).filter(|&total| total <= self.cap)
             })
             .map_err(|_| PackError::PackfileTooLarge)?;

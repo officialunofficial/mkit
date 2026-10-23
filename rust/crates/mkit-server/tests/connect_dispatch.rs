@@ -539,7 +539,7 @@ async fn read_ref_absent_exists_false() {
     let server = setup(AuthMode::Open).serve();
     let absent = server.read(HEAD).await;
     assert_eq!(absent.exists, Some(false));
-    assert!(absent.object_id.unwrap_or_default().is_empty());
+    assert_eq!(absent.object_id.unwrap_or_default(), [] as [u8; 0]);
     let reply = server
         .json(
             "UpdateRef",
@@ -813,7 +813,7 @@ async fn pack_locations_require_opt_in_and_preserve_legacy_wire_bytes() {
 async fn pack_location_provider_is_not_called_for_missing_pack() {
     let (server, calls) = location_server(false);
     let (messages, end) = opted_in_download(&server, &[9; 32]).await.frames();
-    assert!(messages.is_empty());
+    assert_eq!(messages, [] as [bytes::Bytes; 0]);
     assert_eq!(end["error"]["code"], "not_found");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
@@ -836,7 +836,7 @@ async fn upload_pack_first_message_not_header_is_invalid_argument() {
         .upload(&[chunk(&hash(&data), 0, &data, true)], &[])
         .await;
     let (messages, end) = reply.frames();
-    assert!(messages.is_empty());
+    assert_eq!(messages, [] as [bytes::Bytes; 0]);
     assert_eq!(end["error"]["code"], "invalid_argument");
     assert_eq!(
         end["error"]["message"],
@@ -877,7 +877,7 @@ async fn upload_pack_broken_stream_records_the_code_sent() {
     body.extend_from_slice(&[0, 0, 0, 0, 16, 1, 2]);
     let path = "mkit.transport.v1.TransportService/UploadPack";
     let (messages, end) = server.post(path, STREAM, &[], body).await.frames();
-    assert!(messages.is_empty());
+    assert_eq!(messages, [] as [bytes::Bytes; 0]);
     let code = end["error"]["code"].as_str().unwrap();
     assert_ne!(code, "canceled");
     assert_eq!(server.codes("UploadPack"), [code]);
@@ -891,7 +891,7 @@ async fn upload_pack_hash_mismatch_is_invalid_argument_and_not_stored() {
     let id = hash(&data);
     let msgs = [header(&data), chunk(&id, 0, &[0; 8], true)];
     let (messages, end) = server.upload(&msgs, &[]).await.frames();
-    assert!(messages.is_empty());
+    assert_eq!(messages, [] as [bytes::Bytes; 0]);
     assert_eq!(end["error"]["code"], "invalid_argument");
     assert_eq!(
         end["error"]["message"],
@@ -899,7 +899,7 @@ async fn upload_pack_hash_mismatch_is_invalid_argument_and_not_stored() {
     );
     assert!(!server.exists(&id).await);
     let (messages, end) = server.download(&id, &[]).await.frames();
-    assert!(messages.is_empty());
+    assert_eq!(messages, [] as [bytes::Bytes; 0]);
     assert_eq!(end["error"]["code"], "not_found");
 }
 
@@ -1169,7 +1169,7 @@ async fn bearer_mode_rejects_missing_token_on_streaming_and_unary() {
         "unauthenticated"
     );
     let (messages, end) = server.download(&[9; 32], &[]).await.frames();
-    assert!(messages.is_empty());
+    assert_eq!(messages, [] as [bytes::Bytes; 0]);
     assert_eq!(end["error"]["code"], "unauthenticated");
     let (_, end) = server.upload(&upload_msgs(&pack(4), 4), &[]).await.frames();
     assert_eq!(end["error"]["code"], "unauthenticated");
@@ -2016,7 +2016,7 @@ async fn upload_part_requires_authentication_before_stream_contents() {
             )
             .await;
         let (messages, end) = reply.frames();
-        assert!(messages.is_empty());
+        assert_eq!(messages, [] as [bytes::Bytes; 0]);
         assert_eq!(end["error"]["code"], "unauthenticated");
     }
 }
@@ -2202,7 +2202,7 @@ async fn m1_ticketed_upload_pack_validates_header_before_mode_and_never_reads_ch
             )
             .await;
         let (messages, end) = reply.frames();
-        assert!(messages.is_empty());
+        assert_eq!(messages, [] as [bytes::Bytes; 0]);
         assert_eq!(end["error"]["code"], code);
         assert_eq!(end["error"]["message"], message);
     }
@@ -2422,7 +2422,7 @@ async fn server_info_is_public_ignores_repository_and_sets_cache_header() {
         assert_eq!(info.begin_upload_threshold_bytes, Some(u64::MAX));
         assert_eq!(info.receipt_public_key, Some(vec![]));
         assert_eq!(info.receipt_key_id.as_deref(), Some(""));
-        assert!(info.grant_schemes.is_empty());
+        assert_eq!(info.grant_schemes, [] as [std::string::String; 0]);
         assert_eq!(original.headers["cache-control"], "private, max-age=60");
         for repository in ["not-here", "ed25519:bad/../invalid"] {
             let reply = server

@@ -1442,7 +1442,7 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
 
         let pushed = run(source.path(), &["push", "origin"]);
         assert_eq!(pushed.status.code(), Some(0), "{scheme}: {pushed:?}");
-        assert!(pushed.stdout.is_empty());
+        assert_eq!(pushed.stdout, [] as [u8; 0]);
         assert_eq!(
             pushed.stderr,
             format!("To {endpoint}\n * [new branch]      main -> main\n").as_bytes()
@@ -1450,7 +1450,7 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         transcript.push(endpoint_transcript(&pushed, &endpoint));
         let unchanged = run(source.path(), &["push"]);
         assert_eq!(unchanged.status.code(), Some(0));
-        assert!(unchanged.stdout.is_empty());
+        assert_eq!(unchanged.stdout, [] as [u8; 0]);
         assert_eq!(unchanged.stderr, b"Everything up-to-date\n");
         transcript.push(endpoint_transcript(&unchanged, &endpoint));
 
@@ -1475,7 +1475,7 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         refs::write_ref(&source_layout, "main", &second).unwrap();
         let appended = run(source.path(), &["push"]);
         assert_eq!(appended.status.code(), Some(0), "{scheme}: {appended:?}");
-        assert!(appended.stdout.is_empty());
+        assert_eq!(appended.stdout, [] as [u8; 0]);
         assert_eq!(
             appended.stderr,
             format!(
@@ -1529,7 +1529,7 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         refs::write_ref(&source_layout, "main", &first).unwrap();
         let rejected = run(source.path(), &["push"]);
         assert_eq!(rejected.status.code(), Some(1), "{scheme}: {rejected:?}");
-        assert!(rejected.stdout.is_empty());
+        assert_eq!(rejected.stdout, [] as [u8; 0]);
         transcript.push(endpoint_transcript(&rejected, &endpoint));
         if let Some(proxy) = &proxy {
             // The up-to-date and rejected pushes resolve from local tracking

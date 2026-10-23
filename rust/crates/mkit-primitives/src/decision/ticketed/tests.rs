@@ -1493,7 +1493,7 @@ fn apply_adds_each_consumed_pack_to_membership_once() {
         panic!("expected apply");
     };
     assert_eq!(effects.membership.len(), 2);
-    distinct.claims.truncate(0);
+    distinct.claims.clear();
 }
 
 #[test]

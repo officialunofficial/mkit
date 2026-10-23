@@ -91,7 +91,9 @@ fn update(dir: &Path, bytes: &[u8]) {
 
 fn bytes_from_hex(hex: &str) -> Vec<u8> {
     hex.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
         .collect()
 }

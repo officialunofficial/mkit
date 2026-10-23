@@ -384,7 +384,7 @@ async fn the_hooks_see_the_source_facts_and_the_charge_settles_once() {
         (bytes_stored, new_to_repo),
         (result.pack_bytes, result.pack_bytes)
     );
-    assert!(refs.is_empty());
+    assert_eq!(refs, [] as [mkit_server::store::OutcomeRef; 0]);
 }
 
 #[tokio::test]

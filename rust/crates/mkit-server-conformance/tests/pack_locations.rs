@@ -119,7 +119,10 @@ async fn denial_after_issue_expires_within_advertised_bound() {
         .unwrap();
     for accept in [false, true] {
         let denied = download_repo(&host, bytes, accept, &repository).await;
-        assert!(denied.messages.is_empty());
+        assert_eq!(
+            denied.messages,
+            [] as [mkit_client::proto::DownloadPackResponse; 0]
+        );
         assert_eq!(denied.error.unwrap().code, "not_found");
     }
     host.clock().set(location.expires_at_ms.unwrap());
@@ -213,7 +216,10 @@ async fn held_pending_private_and_other_repository_never_issue_locations() {
         set_membership(&host, &repo, bytes, published, held).await;
         for accept in [false, true] {
             let reply = download_repo(&host, bytes, accept, &repository).await;
-            assert!(reply.messages.is_empty());
+            assert_eq!(
+                reply.messages,
+                [] as [mkit_client::proto::DownloadPackResponse; 0]
+            );
             assert_eq!(reply.error.unwrap().code, "not_found");
         }
     }
@@ -235,7 +241,10 @@ async fn held_pending_private_and_other_repository_never_issue_locations() {
         .unwrap();
     for accept in [false, true] {
         let reply = download_repo(&host, bytes, accept, &other).await;
-        assert!(reply.messages.is_empty());
+        assert_eq!(
+            reply.messages,
+            [] as [mkit_client::proto::DownloadPackResponse; 0]
+        );
         assert_eq!(reply.error.unwrap().code, "not_found");
     }
     host.kv()
@@ -255,7 +264,10 @@ async fn held_pending_private_and_other_repository_never_issue_locations() {
         .unwrap();
     for accept in [false, true] {
         let reply = download_repo(&host, bytes, accept, &repository).await;
-        assert!(reply.messages.is_empty());
+        assert_eq!(
+            reply.messages,
+            [] as [mkit_client::proto::DownloadPackResponse; 0]
+        );
         assert_eq!(reply.error.unwrap().code, "not_found");
     }
     host.shutdown().await;

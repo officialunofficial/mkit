@@ -185,7 +185,8 @@ impl Transport for MemoryTransport {
                 // prefix of the latter (SPEC-REFS §4).
                 let rest = if prefix_trimmed.is_empty() {
                     full_name.as_str()
-                } else if let Some(after) = full_name.strip_prefix(prefix_trimmed) {
+                } else {
+                    let after = full_name.strip_prefix(prefix_trimmed)?;
                     match after.strip_prefix('/') {
                         Some(stripped) => stripped,
                         // No separator immediately after the prefix: either
@@ -195,8 +196,6 @@ impl Transport for MemoryTransport {
                         None if after.is_empty() => after,
                         None => return None,
                     }
-                } else {
-                    return None;
                 };
 
                 // The remaining suffix must itself be a valid ref name
@@ -433,7 +432,7 @@ mod tests {
         let t = MemoryTransport::new();
         t.write_ref("refs/heads/main", &blake3_hash(b"m")).unwrap();
         let tags = t.list_refs("refs/tags/").unwrap();
-        assert!(tags.is_empty());
+        assert_eq!(tags, [] as [mkit_core::Ref; 0]);
     }
 
     #[test]

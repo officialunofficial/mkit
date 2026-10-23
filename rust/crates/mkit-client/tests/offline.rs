@@ -240,7 +240,10 @@ fn a_402_without_a_connect_body_still_parses_from_headers() {
     let Error::PaymentRequired(required) = error else {
         panic!("expected a typed challenge");
     };
-    assert!(required.challenges.is_empty());
+    assert_eq!(
+        required.challenges,
+        [] as [mkit_client::AdmissionChallengeEntry; 0]
+    );
     assert_eq!(required.www_authenticate, ["Payment id=\"p\""]);
     assert_eq!(required.payment_required, ["abc"]);
 }

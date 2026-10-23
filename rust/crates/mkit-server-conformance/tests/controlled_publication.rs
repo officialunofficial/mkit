@@ -60,7 +60,10 @@ async fn optional_removal_features_and_combined_publication_are_truthful() {
     };
     for filter in ["publication.combined_", "reliance."] {
         let report = controlled::run(&target, &BTreeMap::new(), Some(filter)).await;
-        assert!(!report.cases.is_empty());
+        assert_ne!(
+            report.cases,
+            [] as [mkit_server_conformance::wire::CaseReport; 0]
+        );
         assert!(
             report
                 .cases

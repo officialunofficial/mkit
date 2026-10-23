@@ -213,7 +213,7 @@ fn position_leaf(index: u32, leaf: &Hash) -> Hash {
 /// leaf has 1 level, a tree with 2 leaves has 2 levels, etc. Ported from
 /// `commonware_storage::bmt::levels_in_tree`.
 fn levels_in_tree(leaf_count: u32) -> usize {
-    (u32::BITS - leaf_count.saturating_sub(1).leading_zeros() + 1) as usize
+    (leaf_count.saturating_sub(1).bit_width() + 1) as usize
 }
 
 /// A built BMT: every level from the position-hashed leaves up to the

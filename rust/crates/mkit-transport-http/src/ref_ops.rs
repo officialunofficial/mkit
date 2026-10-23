@@ -731,6 +731,7 @@ mod tests {
 
     #[test]
     fn read_ref_rejects_invalid_name() {
+        // SAFETY: single-threaded test process has no concurrent readers.
         unsafe { env::remove_var(TOKEN_ENV) };
         let t = HttpTransport::connect("mkit+https://example.com/p").unwrap();
         let err = t.read_ref("../escape").unwrap_err();
@@ -890,6 +891,7 @@ mod tests {
 
     #[test]
     fn list_refs_rejects_invalid_prefix() {
+        // SAFETY: single-threaded test process has no concurrent readers.
         unsafe { env::remove_var(TOKEN_ENV) };
         let t = HttpTransport::connect("mkit+https://example.com/p").unwrap();
         let err = t.list_refs("bad//prefix").unwrap_err();

@@ -36,7 +36,7 @@ impl NamespaceStore for ReservedReads {
     }
     fn reserve_read_calls(&self, calls: u32) -> Result<Option<ReadReservation>, StoreError> {
         self.remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
                 left.checked_sub(calls)
             })
             .map_err(|_| {

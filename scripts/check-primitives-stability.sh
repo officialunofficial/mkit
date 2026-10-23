@@ -26,7 +26,7 @@ fi
 
 # Only rustdoc's JSON interface needs nightly. Keep all dependency compilation
 # on that same pinned compiler, without passing cfgs to those dependencies.
-nightly=nightly-2026-06-09
+nightly=nightly-2026-09-01
 if ! rustup run "$nightly" rustdoc --version >/dev/null 2>&1; then
   rustup toolchain install "$nightly" --profile minimal --no-self-update
 fi

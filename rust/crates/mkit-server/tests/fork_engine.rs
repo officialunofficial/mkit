@@ -101,15 +101,15 @@ async fn forks_a_published_branch_into_an_empty_repository() {
     // No ref exists.
     let (start, end) = keys::ref_index_prefix_range(&dest.name, "");
     for p in source.shards.ref_index_partitions(&dest) {
-        assert!(
+        assert_eq!(
             source
                 .store
                 .inner
                 .scan(&p, &start, &end, None, 1)
                 .await
                 .unwrap()
-                .entries
-                .is_empty()
+                .entries,
+            [] as [(mkit_server::Key, mkit_server::Value); 0]
         );
     }
     // The cleared set holds the commit and the tree only.
@@ -864,7 +864,10 @@ async fn the_destination_chain_serves_the_inherited_packs_without_verification_s
             .scan(&p, &start, &end, None, 10)
             .await
             .unwrap();
-        assert!(rows.entries.is_empty());
+        assert_eq!(
+            rows.entries,
+            [] as [(mkit_server::Key, mkit_server::Value); 0]
+        );
     }
     let (bytes, head) = commit_pack(source.tree, vec![], b"remix");
     let pack = mkit_core::hash::hash(&bytes);
@@ -1026,7 +1029,7 @@ async fn acceptance_commits_outcome_and_replay_before_clearance_and_never_resett
     };
     assert_eq!(procedure, StoredProcedure::Fork);
     assert_eq!(bytes_stored, accepted.accepted.clone().unwrap().pack_bytes);
-    assert!(refs.is_empty());
+    assert_eq!(refs, [] as [mkit_server::store::OutcomeRef; 0]);
     let replay = source
         .store
         .inner
@@ -1648,7 +1651,10 @@ async fn without_pack_level_denial_the_cleared_set_is_not_honored() {
         .scan(&partition, &start, &end, None, 100)
         .await
         .unwrap();
-    assert!(!rows.entries.is_empty());
+    assert_ne!(
+        rows.entries,
+        [] as [(mkit_server::Key, mkit_server::Value); 0]
+    );
     let mut batch = mkit_server::Batch::new();
     for (key, _) in rows.entries {
         batch = batch.delete(key);

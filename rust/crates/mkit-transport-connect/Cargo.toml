@@ -44,7 +44,7 @@ connectrpc = { version = "0.9.0", default-features = false, features = [
     "json",
 ] }
 buffa = "0.9.1"
-base64 = "0.22"
+base64 = "0.23"
 
 # Async runtime driving the ConnectRPC client. The `Transport` trait (mkit_core::protocol::Transport) is
 # synchronous; `mkit_core::protocol::async_shim::Executor` bridges the
@@ -68,9 +68,6 @@ http-body-util = "0.1"
 bytes = "1.6"
 futures = "0.3"
 url = "2"
-
-serde = { version = "1", features = ["derive"] }
-log = "0.4"
 
 # CSPRNG for the write-envelope idempotency key (`envelope::EnvelopeTransport`)
 # — same crate/version mkit-core, mkit-cli, and mkit-keystore already pull in

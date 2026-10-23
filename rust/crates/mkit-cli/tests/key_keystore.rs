@@ -181,11 +181,11 @@ fn key_import_list_export_delete_roundtrip() {
 
     let list_after_delete = run(td.path(), &["key", "list", "--backend", "software-raw"]);
     assert!(list_after_delete.status.success());
-    assert!(
+    assert_eq!(
         String::from_utf8(list_after_delete.stdout)
             .expect("stdout utf8")
-            .trim()
-            .is_empty()
+            .trim(),
+        ""
     );
 }
 

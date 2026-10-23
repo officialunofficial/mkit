@@ -332,7 +332,7 @@ mod tests {
         let layout = RepoLayout::single(dir.path());
         let commit = fake_hash(0x44);
         let listed = list(&layout, &commit).unwrap();
-        assert!(listed.is_empty());
+        assert_eq!(listed, [] as [std::path::PathBuf; 0]);
     }
 
     #[test]
@@ -363,7 +363,7 @@ mod tests {
         remove(&layout, &commit, &att_id).unwrap();
 
         let listed = list(&layout, &commit).unwrap();
-        assert!(listed.is_empty());
+        assert_eq!(listed, [] as [std::path::PathBuf; 0]);
 
         let commit_dir = layout.attestations_dir().join(hash_mod::to_hex(&commit));
         assert!(!commit_dir.exists());

@@ -797,7 +797,7 @@ fn read_chunked_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
         if line == "\r\n" {
             break;
         }
-        assert!(!line.is_empty());
+        assert_ne!(line, "");
     }
     let mut body = Vec::new();
     loop {
@@ -1226,7 +1226,7 @@ fn diagnosed_body_io_has_a_typed_cause_without_the_native_display_prefix() {
     assert_eq!(failures[0].0, mkit_client::FailureKind::BodyIo);
     assert_eq!(failures[0].1, 200);
     assert!(!failures[0].2.starts_with("response body:"));
-    assert!(!failures[0].2.is_empty());
+    assert_ne!(failures[0].2, "");
 }
 
 #[test]
