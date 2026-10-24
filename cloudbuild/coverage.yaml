@@ -26,10 +26,10 @@ options:
   # default Cloud Build account. Cloud Build rejects a custom account with no
   # log option.
   logging: CLOUD_LOGGING_ONLY
-  machineType: E2_HIGHCPU_8
+  machineType: E2_HIGHCPU_32
   diskSizeGb: 100
   dynamicSubstitutions: true
-timeout: 2400s
+timeout: 3600s
 
 steps:
   - name: ${_CI_IMAGE}
