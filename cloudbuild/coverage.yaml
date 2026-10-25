@@ -26,7 +26,7 @@ options:
   # default Cloud Build account. Cloud Build rejects a custom account with no
   # log option.
   logging: CLOUD_LOGGING_ONLY
-  machineType: E2_HIGHCPU_32
+  machineType: E2_HIGHCPU_8
   diskSizeGb: 100
   dynamicSubstitutions: true
 timeout: 3600s
@@ -46,6 +46,8 @@ steps:
       # crate's test suite grew.
       - "CARGO_PROFILE_DEV_DEBUG=0"
       - "CARGO_PROFILE_TEST_DEBUG=0"
+      # Two rustc jobs at a time keep peak memory under the 8 GB machine.
+      - "CARGO_BUILD_JOBS=2"
       - "RUSTC_WRAPPER=sccache"
       - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
       - "SCCACHE_GCS_RW_MODE=READ_WRITE"
