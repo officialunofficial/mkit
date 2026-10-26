@@ -253,7 +253,7 @@ jobs:
           components: rustfmt,clippy
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16  # v2
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
         with:
           workspaces: rust -> rust/target
           # Partition release caches away from PR-event workflow caches —
@@ -763,7 +763,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16  # v2
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
         with:
           workspaces: rust -> rust/target
           prefix-key: "rust-release-wasm32"
