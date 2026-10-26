@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Speed up the FastCDC cut scan (`FastCdc::cut`) ~13-16% (1.64 -> ~1.85-1.92 GB/s on
+  random data) by processing four bytes per step so table loads sit off the
+  gear-hash dependency chain. Chunk boundaries are byte-identical (pinned by a
+  differential test against the scalar loop); no wire or stored-format change.
+
 - Remove the hosted-workspace Cloudflare Worker (`apps/workspace-worker`) and
   its CI, Dependabot and documentation entries. The website no longer has a
   server session: the passkey identity (create, unlock, lock signing, sign out,

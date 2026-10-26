@@ -150,24 +150,75 @@ impl FastCdc {
         let table = gear_table();
         let mut hash: u64 = 0;
         let avg_end = self.avg_size.min(data.len());
-        let mut i = self.min_size;
-        while i < avg_end {
-            hash = (hash << 1).wrapping_add(table[data[i] as usize]);
-            if (hash & self.mask_s) == 0 {
-                return i;
-            }
-            i += 1;
-        }
         let max_end = self.max_size.min(data.len());
-        while i < max_end {
-            hash = (hash << 1).wrapping_add(table[data[i] as usize]);
-            if (hash & self.mask_l) == 0 {
-                return i;
-            }
-            i += 1;
+        if let Some(i) = scan(table, data, self.min_size, avg_end, self.mask_s, &mut hash) {
+            return i;
+        }
+        if let Some(i) = scan(table, data, avg_end, max_end, self.mask_l, &mut hash) {
+            return i;
         }
         max_end
     }
+}
+
+/// Scan `data[start..end]`, rolling `hash` forward, and return the first
+/// index `i` whose post-update hash satisfies `hash & mask == 0`.
+///
+/// Bit-for-bit equivalent to the one-byte-at-a-time recurrence
+/// `hash = (hash << 1) + table[data[i]]`, but processes four bytes per
+/// step. Each intermediate hash is `(hash << k) + c_k` where `c_k` depends
+/// only on the next four bytes, so the table loads and adds sit off the
+/// loop-carried dependency chain, which shrinks from a shift+add per byte
+/// to a shift+add per four bytes. A hit inside a block is resolved by
+/// replaying that block serially, so the earliest matching index (and
+/// hence every chunk boundary) is unchanged.
+#[inline]
+fn scan(
+    table: &[u64; 256],
+    data: &[u8],
+    start: usize,
+    end: usize,
+    mask: u64,
+    hash: &mut u64,
+) -> Option<usize> {
+    let mut h = *hash;
+    let mut i = start;
+    while i + 4 <= end {
+        let t0 = table[data[i] as usize];
+        let t1 = table[data[i + 1] as usize];
+        let t2 = table[data[i + 2] as usize];
+        let t3 = table[data[i + 3] as usize];
+        let c2 = (t0 << 1).wrapping_add(t1);
+        let c3 = (c2 << 1).wrapping_add(t2);
+        let c4 = (c3 << 1).wrapping_add(t3);
+        let h1 = (h << 1).wrapping_add(t0);
+        let h2 = (h << 2).wrapping_add(c2);
+        let h3 = (h << 3).wrapping_add(c3);
+        let h4 = (h << 4).wrapping_add(c4);
+        if (h1 & mask).min(h2 & mask).min(h3 & mask).min(h4 & mask) == 0 {
+            if (h1 & mask) == 0 {
+                return Some(i);
+            }
+            if (h2 & mask) == 0 {
+                return Some(i + 1);
+            }
+            if (h3 & mask) == 0 {
+                return Some(i + 2);
+            }
+            return Some(i + 3);
+        }
+        h = h4;
+        i += 4;
+    }
+    while i < end {
+        h = (h << 1).wrapping_add(table[data[i] as usize]);
+        if (h & mask) == 0 {
+            return Some(i);
+        }
+        i += 1;
+    }
+    *hash = h;
+    None
 }
 
 /// Iterator over chunk boundaries in a contiguous byte slice.
@@ -389,6 +440,59 @@ mod tests {
                 let bytes = self.next_u64().to_le_bytes();
                 let n = chunk.len();
                 chunk.copy_from_slice(&bytes[..n]);
+            }
+        }
+    }
+
+    /// The original one-byte-at-a-time scan, kept as the oracle for the
+    /// four-byte unrolled `scan`.
+    fn cut_reference(cdc: &FastCdc, data: &[u8]) -> usize {
+        if data.len() <= cdc.min_size {
+            return data.len();
+        }
+        let table = gear_table();
+        let mut hash: u64 = 0;
+        let avg_end = cdc.avg_size.min(data.len());
+        let mut i = cdc.min_size;
+        while i < avg_end {
+            hash = (hash << 1).wrapping_add(table[data[i] as usize]);
+            if (hash & cdc.mask_s) == 0 {
+                return i;
+            }
+            i += 1;
+        }
+        let max_end = cdc.max_size.min(data.len());
+        while i < max_end {
+            hash = (hash << 1).wrapping_add(table[data[i] as usize]);
+            if (hash & cdc.mask_l) == 0 {
+                return i;
+            }
+            i += 1;
+        }
+        max_end
+    }
+
+    #[test]
+    fn unrolled_cut_matches_scalar_reference() {
+        let mut rng = Prng::new(0x00C0_FFEE);
+        let mut data = vec![0u8; 3 * MAX_SIZE];
+        rng.fill(&mut data);
+        let cdcs = [
+            FastCdc::v1(),
+            FastCdc::custom(64, 256, 1024),
+            FastCdc::custom(61, 512, 1013),
+        ];
+        for cdc in &cdcs {
+            let mut off = 0;
+            while off < data.len() {
+                let rest = &data[off..];
+                let got = cdc.cut(rest);
+                assert_eq!(got, cut_reference(cdc, rest), "offset {off}");
+                off += got;
+            }
+            for len in 0..300 {
+                let slice = &data[..len];
+                assert_eq!(cdc.cut(slice), cut_reference(cdc, slice), "len {len}");
             }
         }
     }
