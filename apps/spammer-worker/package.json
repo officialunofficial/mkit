@@ -28,13 +28,13 @@
     "mkit-wasm": "workspace:*"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261016.1",
+    "@cloudflare/workers-types": "^5.20261026.1",
     "@types/node": "^26.6.5",
     "@vitest/coverage-v8": "^4.1.12",
     "typescript": "^7.0.2",
     "vitest": "^4.1.12",
-    "wrangler": "^4.151.0",
-    "@cloudflare/vitest-plugin": "^1.4.3"
+    "wrangler": "^4.153.0",
+    "@cloudflare/vitest-plugin": "^1.4.8"
   },
   "overrides": {
     "sharp": "^0.35.4"
