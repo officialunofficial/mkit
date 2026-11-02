@@ -80,7 +80,7 @@ jobs:
       # `cargo test`. Pinned via taiki-e/install-action which fetches a
       # cosign-signed prebuilt binary from the cargo-nextest release.
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91  # v2
         with:
           tool: cargo-nextest
 
