@@ -13,6 +13,15 @@
 //! to compare the *next* entry's name against it — the just-pushed
 //! entry already holds that name, so the clone was pure waste.
 //!
+//! `read_object` (cold) moves its tempdir into the timed routine, so it
+//! also times tempdir teardown (~1 ms, ~95% of the 100-entry figure).
+//! `read_object_warm` (store built once) isolates the real read +
+//! verify + decode cost, and `compute_tree_id` isolates the BMT root,
+//! which is ~80% of a warm tree read: ~3 tiny BLAKE3 calls per entry at
+//! ~115 ns each. An in-place root-only fold plus an allocation-free
+//! entry leaf was tried and measured within noise (<6%), so hashing
+//! count, not allocation, is the lever.
+//!
 //! Numbers are wallclock ms; smaller is better.
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -66,6 +75,21 @@ fn bench_object_read(c: &mut Criterion) {
         });
 
         // --- through the store: read_raw + id-verify + decode ----------
+        // Pure BMT-root cost (the id check inside read_object).
+        let t = tree_with_entries(n);
+        c.bench_function(&format!("object_read/compute_tree_id/{axis}"), |b| {
+            b.iter(|| mkit_core::merkle::compute_tree_id(std::hint::black_box(&t)));
+        });
+        // Warm-store variant: store built once, so the timing is the
+        // read + id-verify + decode alone (no tempdir teardown).
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+            let h = store.write(&bytes).unwrap();
+            c.bench_function(&format!("object_read/read_object_warm/{axis}"), |b| {
+                b.iter(|| store.read_object(&h).unwrap());
+            });
+        }
         c.bench_function(&format!("object_read/read_object/{axis}"), |b| {
             b.iter_with_setup(
                 || {
