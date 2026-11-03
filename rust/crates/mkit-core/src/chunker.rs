@@ -148,26 +148,106 @@ impl FastCdc {
             return data.len();
         }
         let table = gear_table();
-        let mut hash: u64 = 0;
         let avg_end = self.avg_size.min(data.len());
-        let mut i = self.min_size;
-        while i < avg_end {
-            hash = (hash << 1).wrapping_add(table[data[i] as usize]);
-            if (hash & self.mask_s) == 0 {
-                return i;
-            }
-            i += 1;
+        if let Some(i) = scan(table, data, self.min_size, avg_end, self.mask_s, 0) {
+            return i;
+        }
+        // Only the low `bits(mask)` bits of the hash can influence a cut
+        // test, and those depend solely on the last `bits(mask)` bytes
+        // (older bytes are shifted out). Rebuild the hash at `avg_end`
+        // from that short window instead of carrying it across phases.
+        let warm = (64 - self.mask_s.leading_zeros()) as usize;
+        let ws = self.min_size.max(avg_end.saturating_sub(warm));
+        let mut hash = 0u64;
+        for &b in &data[ws..avg_end] {
+            hash = (hash << 1).wrapping_add(table[b as usize]);
         }
         let max_end = self.max_size.min(data.len());
-        while i < max_end {
-            hash = (hash << 1).wrapping_add(table[data[i] as usize]);
-            if (hash & self.mask_l) == 0 {
-                return i;
-            }
-            i += 1;
-        }
-        max_end
+        scan(table, data, avg_end, max_end, self.mask_l, hash).unwrap_or(max_end)
     }
+}
+
+/// Bytes per lane per block in [`scan`].
+const LANE: usize = 256;
+
+/// Scan `data[start..end]` for the first `i` where the rolling hash
+/// (`h = (h << 1) + gear[data[i]]`, entering with `hash`) satisfies
+/// `h & mask == 0`. Bit-for-bit identical to the serial loop.
+///
+/// The serial loop is latency-bound (one dependent shift+add per byte).
+/// Because `h & mask` depends only on the last `bits(mask)` bytes, four
+/// lanes covering consecutive `LANE`-byte stretches can run
+/// interleaved, each warmed up over the preceding `bits(mask)` bytes,
+/// giving the CPU four independent dependency chains. Hits are rare
+/// (~1 per chunk), so on any hit the block is simply redone serially to
+/// pick the earliest one.
+#[inline]
+fn scan(
+    table: &[u64; 256],
+    data: &[u8],
+    start: usize,
+    end: usize,
+    mask: u64,
+    mut hash: u64,
+) -> Option<usize> {
+    let warm = (64 - mask.leading_zeros()) as usize;
+    let mut i = start;
+    // Lane j>0 warms up on `warm` bytes before its stretch; lane 0 needs
+    // the carried hash only, so blocks need `warm` bytes of room at the
+    // front of the *second* lane, which always lies inside [start, end).
+    while warm <= LANE && i + 4 * LANE <= end {
+        let s0 = &data[i..i + LANE];
+        let s1 = &data[i + LANE..i + 2 * LANE];
+        let s2 = &data[i + 2 * LANE..i + 3 * LANE];
+        let s3 = &data[i + 3 * LANE..i + 4 * LANE];
+        let warm_hash = |from: usize| {
+            let mut h = 0u64;
+            for &b in &data[from - warm..from] {
+                h = (h << 1).wrapping_add(table[b as usize]);
+            }
+            h
+        };
+        let (mut h0, mut h1, mut h2, mut h3) = (
+            hash,
+            warm_hash(i + LANE),
+            warm_hash(i + 2 * LANE),
+            warm_hash(i + 3 * LANE),
+        );
+        let mut hit = false;
+        for t in 0..LANE {
+            h0 = (h0 << 1).wrapping_add(table[s0[t] as usize]);
+            h1 = (h1 << 1).wrapping_add(table[s1[t] as usize]);
+            h2 = (h2 << 1).wrapping_add(table[s2[t] as usize]);
+            h3 = (h3 << 1).wrapping_add(table[s3[t] as usize]);
+            let any = u8::from(h0 & mask == 0)
+                | u8::from(h1 & mask == 0)
+                | u8::from(h2 & mask == 0)
+                | u8::from(h3 & mask == 0);
+            if any != 0 {
+                hit = true;
+                break;
+            }
+        }
+        if hit {
+            for t in i..i + 4 * LANE {
+                hash = (hash << 1).wrapping_add(table[data[t] as usize]);
+                if (hash & mask) == 0 {
+                    return Some(t);
+                }
+            }
+            unreachable!("lane hit must reproduce serially");
+        }
+        hash = h3;
+        i += 4 * LANE;
+    }
+    while i < end {
+        hash = (hash << 1).wrapping_add(table[data[i] as usize]);
+        if (hash & mask) == 0 {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Iterator over chunk boundaries in a contiguous byte slice.
@@ -390,6 +470,69 @@ mod tests {
                 let n = chunk.len();
                 chunk.copy_from_slice(&bytes[..n]);
             }
+        }
+    }
+
+    /// The pre-lane serial implementation, kept as the oracle.
+    fn cut_reference(c: &FastCdc, data: &[u8]) -> usize {
+        if data.len() <= c.min_size {
+            return data.len();
+        }
+        let table = gear_table();
+        let mut hash: u64 = 0;
+        let avg_end = c.avg_size.min(data.len());
+        let mut i = c.min_size;
+        while i < avg_end {
+            hash = (hash << 1).wrapping_add(table[data[i] as usize]);
+            if (hash & c.mask_s) == 0 {
+                return i;
+            }
+            i += 1;
+        }
+        let max_end = c.max_size.min(data.len());
+        while i < max_end {
+            hash = (hash << 1).wrapping_add(table[data[i] as usize]);
+            if (hash & c.mask_l) == 0 {
+                return i;
+            }
+            i += 1;
+        }
+        max_end
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation)]
+    fn lane_scan_matches_serial_reference() {
+        let mut x = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let chunkers = [
+            FastCdc::v1(),
+            FastCdc::custom(64, 512, 4096),
+            FastCdc::custom(1024, 8192, 65536),
+            FastCdc::custom(4096, 16384, 1 << 20),
+        ];
+        for c in chunkers {
+            for _ in 0..300 {
+                let len = (next() as usize) % (c.max_size * 2);
+                let mut data = vec![0u8; len];
+                for b in &mut data {
+                    *b = next() as u8;
+                }
+                assert_eq!(c.cut(&data), cut_reference(&c, &data), "len={len}");
+            }
+        }
+        // Degenerate content: constant bytes (never/always cuts).
+        for fill in [0u8, 0xff] {
+            let data = vec![fill; MAX_SIZE + 1000];
+            assert_eq!(
+                FastCdc::v1().cut(&data),
+                cut_reference(&FastCdc::v1(), &data)
+            );
         }
     }
 

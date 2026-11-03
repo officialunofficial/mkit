@@ -216,6 +216,10 @@ harness = false
 name = "chunker_streaming"
 harness = false
 
+[[bench]]
+name = "chunker_cut"
+harness = false
+
 # Issue #159 — sharded vs monolithic 100 MiB pack transfer
 # with simulated network jitter. Default-off (the `pack-shards`
 # feature on mkit-core pulls in the commonware dep stack, which is
