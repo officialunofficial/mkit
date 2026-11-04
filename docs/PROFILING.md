@@ -148,3 +148,32 @@ Sampling profiles are interactive artifacts for investigation, not a
 pass/fail gate &mdash; the criterion benches and `scripts/bench-vs-git.sh` cover
 regression tracking. Capture a profile when a bench moves and you want to
 know *why*.
+
+## Negative result: inter-file fan-out for small-file restore
+
+`restore_tree_to_worktree_with` fans a *large* file's chunk reads out, but
+restores files one at a time. We prototyped deferring plain-blob writes and
+running them on `min(cores, 8)` scoped threads (workers claiming either
+single jobs or blocks of 32; `ChunkedBlob`s kept sequential), and measured it
+with `cargo bench -p mkit-benches --bench restore_small_files`
+(sequential vs parallel, 4 KiB files across 50 directories, 4-core ext4 VM):
+
+| Disk regime | 1,000 files | 5,000 files |
+|---|---|---|
+| Fast (no writeback stalls) | 25.6 ms → 31.8 ms (slower) | 168 ms → 560 ms (slower) |
+| Slow (writeback/journal stalls) | 233–268 ms → 128–138 ms (~1.9× faster) | 1.06–1.36 s → 0.50–0.57 s (~2.2× faster) |
+
+The sign of the result flipped with filesystem state, so there is no robust
+>5% win and the change was not landed. Per-file cost is dominated by
+metadata syscalls (`unlink`/`open`/`statx`/`rename`) that serialise on the
+per-directory inode lock and the journal, not by CPU. Notes for next time:
+
+- A syscall trace of `checkout` over 3,000 files shows ~9 `openat` and ~15
+  `statx` per file; much of that is the pre-restore dirty-check scan, which
+  runs before the restore phase and takes longer than the restore itself —
+  it is a better target than the write loop.
+- The restore loop also issues an `unlink` of the (never-existing) tmp name
+  and a `statx` of the destination per file; skipping them is a cheaper
+  single-thread win to try first.
+- Benchmark small-file I/O only with repeated runs; one VM showed a 9×
+  swing in the *same* binary between runs.

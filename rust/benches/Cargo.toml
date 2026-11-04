@@ -188,6 +188,12 @@ harness = false
 name = "restore_chunk_fanout"
 harness = false
 
+# Inter-file fan-out: restore of many small files, sequential loop vs
+# the deferred, thread-pooled write in `restore_tree_to_worktree_with`.
+[[bench]]
+name = "restore_small_files"
+harness = false
+
 # Push planning's per-candidate delta encoding
 # (`transfer::encode_delta_candidate`, fanned out via `mkit-cli`'s
 # `remote_dispatch::encode_delta_candidates_batch`) — per-candidate
